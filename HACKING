@@ -42,13 +42,13 @@ and is not part of a release distribution.
 
 * Before you can build from git, you need to bootstrap.  This requires:
   - A pre-installed version of GNU M4 1.4 or later, built from a package
-  - Autoconf 2.64 or later
-  - Automake 1.11.1 or later
+  - Autoconf 2.69 or later
+  - Automake 1.14 or later
   - Gettext 0.19.2 or later
   - Help2man 1.29 or later
   - Xz 4.999.8beta or later (from <http://tukaani.org/xz/>)
-  - Texinfo 4.11 or later
-  - Any prerequisites of the above (such as perl, tex)
+  - Texinfo 7.0 or later
+  - Any prerequisites of the above (such as perl, python3, tex)
 
   Note that none of these bootstrapping dependencies should be required
   by a distributed release.
@@ -60,22 +60,21 @@ and is not part of a release distribution.
   install:
   - Libsigsegv 2.6 or later (2.9 or later recommended)
 
-* M4 includes gnulib as a git submodule.  By default, the bootstrap
-  script will attempt to run
+* M4 includes gnulib and bootstrap as git submodules.  By default, the
+  bootstrap script will attempt to run
     git submodule update --init
-  to grab a gnulib clone from the official read-only location of
+  to grab a gnulib clone from the official location of
     https://git.savannah.gnu.org/git/gnulib.git
 
   However, this can be network and disk intensive.  If you already have
-  another gnulib clone on your disk, you can use the environment
-  variable GNULIB_SRCDIR to point to the previous checkout to speed up
-  the process.  Additionally, both the bootstrap script and gnulib-tool
-  require a shell that supports functions, so you can set the
-  environment variable CONFIG_SHELL to choose a better shell on systems
-  (like Solaris) where /bin/sh is lacking.  Thus, you may find it
-  convenient to run:
-    GNULIB_SRCDIR=path/to/gnulib CONFIG_SHELL=path/to/sh \
-      path/to/sh ./bootstrap
+  another gnulib clone on your disk, using that as a reference can
+  speed the process up.  Additionally, both the bootstrap script and
+  gnulib-tool require a shell that supports functions, so you can set
+  the environment variable CONFIG_SHELL to choose a better shell on
+  systems (like Solaris) where /bin/sh is lacking.  Thus, you may find
+  it convenient to run:
+    CONFIG_SHELL=path/to/sh \
+      path/to/sh ./bootstrap --gnulib-srcdir=path/to/gnulib
 
   A read-only copy of gnulib can be obtained by:
       git clone https://git.savannah.gnu.org/git/gnulib.git
@@ -116,7 +115,7 @@ and is not part of a release distribution.
   linkers you can.
 
 * For branch-1.4, the testsuite is generated from the documentation.
-  All instances of @example in doc/m4.texi that are not preceeded by
+  All instances of @example in doc/m4.texi that are not preceded by
   "@comment ignore" are turned into tests in the checks directory.
 
 
@@ -294,7 +293,7 @@ and is not part of a release distribution.
   After making edits, mail the diff to <bug-directory@gnu.org>.
 
 
-Copyright (C) 2004-2014, 2016-2017, 2020-2023 Free Software Foundation,
+Copyright (C) 2004-2014, 2016-2017, 2020-2025 Free Software Foundation,
 Inc.
 
 The canonical source of this file is maintained with the

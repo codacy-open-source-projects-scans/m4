@@ -1,6 +1,6 @@
 /* GNU m4 -- A simple macro processor
 
-   Copyright (C) 1989-1994, 2004-2014, 2016-2017, 2020-2023 Free
+   Copyright (C) 1989-1994, 2004-2014, 2016-2017, 2020-2025 Free
    Software Foundation, Inc.
 
    This file is part of GNU M4.
@@ -26,6 +26,12 @@
 
 #include "gl_avltree_oset.h"
 #include "gl_xoset.h"
+
+/* Work around a bogus GCC warning
+   <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=116426>.  */
+#if __GNUC__ >= 6
+# pragma GCC diagnostic ignored "-Wnull-dereference"
+#endif
 
 /* Size of initial in-memory buffer size for diversions.  Small diversions
    would usually fit in.  */
@@ -56,17 +62,17 @@ typedef struct temp_dir m4_temp_dir;
 typedef struct m4_diversion m4_diversion;
 
 struct m4_diversion
+{
+  union
   {
-    union
-      {
-        FILE *file;             /* Diversion file on disk.  */
-        char *buffer;           /* Malloc'd diversion buffer.  */
-        m4_diversion *next;     /* Free-list pointer */
-      } u;
-    int divnum;                 /* Which diversion this represents.  */
-    int size;                   /* Usable size before reallocation.  */
-    int used;                   /* Used buffer length, or tmp file exists.  */
-  };
+    FILE *file;                 /* Diversion file on disk.  */
+    char *buffer;               /* Malloc'd diversion buffer.  */
+    m4_diversion *next;         /* Free-list pointer */
+  } u;
+  int divnum;                   /* Which diversion this represents.  */
+  int size;                     /* Usable size before reallocation.  */
+  int used;                     /* Used buffer length, or tmp file exists.  */
+};
 
 /* Table of diversions 1 through INT_MAX.  */
 static gl_oset_t diversion_table;
@@ -123,8 +129,8 @@ static int tmp_file2_owner;
 
 /* True if tmp_file2 is more recently used.  */
 static bool tmp_file2_recent;
-
 
+
 /* Internal routines.  */
 
 /* Callback for comparing list elements ELT1 and ELT2 for order in
@@ -325,7 +331,7 @@ m4_tmpremove (int divnum)
 /* Transfer the temporary file for diversion OLDNUM to the previously
    unused diversion NEWNUM.  Return an open stream visiting the new
    temporary file, positioned at the end, or exit on failure.  */
-static FILE*
+static FILE *
 m4_tmprename (int oldnum, int newnum)
 {
   /* m4_tmpname reuses its return buffer.  */
@@ -340,7 +346,8 @@ m4_tmprename (int oldnum, int newnum)
       else
         {
           if (close_stream_temp (tmp_file1))
-            m4_failure (errno, _("cannot close temporary file for diversion"));
+            m4_failure (errno,
+                        _("cannot close temporary file for diversion"));
           tmp_file1_owner = 0;
         }
     }
@@ -352,7 +359,8 @@ m4_tmprename (int oldnum, int newnum)
       else
         {
           if (close_stream_temp (tmp_file2))
-            m4_failure (errno, _("cannot close temporary file for diversion"));
+            m4_failure (errno,
+                        _("cannot close temporary file for diversion"));
           tmp_file2_owner = 0;
         }
     }
@@ -364,8 +372,8 @@ m4_tmprename (int oldnum, int newnum)
   free (oldname);
   return m4_tmpopen (newnum, false);
 }
-
 
+
 /*------------------------.
 | Output initialization.  |
 `------------------------*/
@@ -398,7 +406,7 @@ output_exit (void)
 
 /*----------------------------------------------------------------.
 | Reorganize in-memory diversion buffers so the current diversion |
-| can accomodate LENGTH more characters without further           |
+| can accommodate LENGTH more characters without further          |
 | reorganization.  The current diversion buffer is made bigger if |
 | possible.  But to make room for a bigger buffer, one of the     |
 | in-memory diversion buffers might have to be flushed to a newly |
@@ -572,6 +580,7 @@ output_text (const char *text, int length)
     }
   else
     {
+      assert (output_cursor);
       memcpy (output_cursor, text, (size_t) length);
       output_cursor += length;
       output_unused -= length;
@@ -620,14 +629,37 @@ shipout_text (struct obstack *obs, const char *text, int length, int line)
 
         /* In-line short texts.  */
 
-      case 8: OUTPUT_CHARACTER (*text); text++; FALLTHROUGH;
-      case 7: OUTPUT_CHARACTER (*text); text++; FALLTHROUGH;
-      case 6: OUTPUT_CHARACTER (*text); text++; FALLTHROUGH;
-      case 5: OUTPUT_CHARACTER (*text); text++; FALLTHROUGH;
-      case 4: OUTPUT_CHARACTER (*text); text++; FALLTHROUGH;
-      case 3: OUTPUT_CHARACTER (*text); text++; FALLTHROUGH;
-      case 2: OUTPUT_CHARACTER (*text); text++; FALLTHROUGH;
-      case 1: OUTPUT_CHARACTER (*text); FALLTHROUGH;
+      case 8:
+        OUTPUT_CHARACTER (*text);
+        text++;
+        FALLTHROUGH;
+      case 7:
+        OUTPUT_CHARACTER (*text);
+        text++;
+        FALLTHROUGH;
+      case 6:
+        OUTPUT_CHARACTER (*text);
+        text++;
+        FALLTHROUGH;
+      case 5:
+        OUTPUT_CHARACTER (*text);
+        text++;
+        FALLTHROUGH;
+      case 4:
+        OUTPUT_CHARACTER (*text);
+        text++;
+        FALLTHROUGH;
+      case 3:
+        OUTPUT_CHARACTER (*text);
+        text++;
+        FALLTHROUGH;
+      case 2:
+        OUTPUT_CHARACTER (*text);
+        text++;
+        FALLTHROUGH;
+      case 1:
+        OUTPUT_CHARACTER (*text);
+        FALLTHROUGH;
       case 0:
         return;
 
@@ -648,7 +680,7 @@ shipout_text (struct obstack *obs, const char *text, int length, int line)
           output_current_line++;
 #ifdef DEBUG_OUTPUT
           xfprintf (stderr, "DEBUG: line %d, cur %d, cur out %d\n",
-                   line, current_line, output_current_line);
+                    line, current_line, output_current_line);
 #endif
 
           /* Output a `#line NUM' synchronization directive if needed.
@@ -663,7 +695,7 @@ shipout_text (struct obstack *obs, const char *text, int length, int line)
               OUTPUT_CHARACTER ('n');
               OUTPUT_CHARACTER ('e');
               OUTPUT_CHARACTER (' ');
-              for (cursor = ntoa (line, 10); *cursor; cursor++)
+              for (cursor = ntoa (line, 10, NULL); *cursor; cursor++)
                 OUTPUT_CHARACTER (*cursor);
               if (output_current_line < 1 && current_file[0] != '\0')
                 {
@@ -687,7 +719,7 @@ shipout_text (struct obstack *obs, const char *text, int length, int line)
               output_current_line++;
 #ifdef DEBUG_OUTPUT
               xfprintf (stderr, "DEBUG: line %d, cur %d, cur out %d\n",
-                       line, current_line, output_current_line);
+                        line, current_line, output_current_line);
 #endif
             }
           OUTPUT_CHARACTER (*text);
@@ -968,7 +1000,7 @@ freeze_diversions (FILE *file)
   saved_number = current_diversion;
   last_inserted = 0;
   make_diversion (0);
-  output_file = file; /* kludge in the frozen file */
+  output_file = file;           /* kludge in the frozen file */
 
   iter = gl_oset_iterator (diversion_table);
   while (gl_oset_iterator_next (&iter, &elt))

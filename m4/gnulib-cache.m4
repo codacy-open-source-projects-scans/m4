@@ -1,4 +1,4 @@
-# Copyright (C) 2002-2024 Free Software Foundation, Inc.
+# Copyright (C) 2002-2025 Free Software Foundation, Inc.
 #
 # This file is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -28,6 +28,7 @@
 
 # Specification in the form of a command-line invocation:
 # gnulib-tool --import \
+#  --local-dir=gl-mod/bootstrap \
 #  --local-dir=gl \
 #  --lib=libm4 \
 #  --source-base=lib \
@@ -50,6 +51,8 @@
 #  autobuild \
 #  avltree-oset \
 #  binary-io \
+#  bool \
+#  bootstrap \
 #  c-ctype \
 #  c-stack \
 #  clean-temp \
@@ -91,8 +94,7 @@
 #  sigaction \
 #  sigpipe \
 #  spawn-pipe \
-#  stdbool \
-#  stdint \
+#  stdint-h \
 #  stdlib-safer \
 #  strsignal \
 #  strstr \
@@ -106,12 +108,13 @@
 #  version-etc-fsf \
 #  wait-process \
 #  xalloc \
+#  xmemdup0 \
 #  xoset \
 #  xprintf \
 #  xvasprintf-posix
 
 # Specification in the form of a few gnulib-tool.m4 macro invocations:
-gl_LOCAL_DIR([gl])
+gl_LOCAL_DIR([gl-mod/bootstrap:gl])
 gl_MODULES([
   announce-gen
   assert
@@ -119,6 +122,8 @@ gl_MODULES([
   autobuild
   avltree-oset
   binary-io
+  bool
+  bootstrap
   c-ctype
   c-stack
   clean-temp
@@ -160,8 +165,7 @@ gl_MODULES([
   sigaction
   sigpipe
   spawn-pipe
-  stdbool
-  stdint
+  stdint-h
   stdlib-safer
   strsignal
   strstr
@@ -175,6 +179,7 @@ gl_MODULES([
   version-etc-fsf
   wait-process
   xalloc
+  xmemdup0
   xoset
   xprintf
   xvasprintf-posix
