@@ -45,7 +45,7 @@ This manual (@value{UPDATED}) is for GNU M4 (version
 @value{VERSION}), a package containing an implementation of the m4 macro
 language.
 
-Copyright @copyright{} 1989--1994, 2004--2014, 2016--2017, 2020--2025
+Copyright @copyright{} 1989--1994, 2004--2014, 2016--2017, 2020--2026
 Free Software Foundation, Inc.
 
 @quotation
@@ -3637,21 +3637,26 @@ defn(`blah')
 @cindex currying arguments
 @cindex argument currying
 Another interesting composition tactic is argument @dfn{currying}, or
-factoring a macro that takes multiple arguments for use in a context
-that provides exactly one argument.
+wrapping a macro that normally takes multiple arguments in a way that
+the initial arguments can be supplied early, and the remaining arguments
+are applied later in a context that normally expects a macro name that
+accepts fewer arguments (often just one).
 
 @deffn Composite curry (@var{macro}, @dots{})
-Expand to a macro call that takes exactly one argument, then appends
-that argument to the original arguments and invokes @var{macro} with the
+Accept a list of early arguments, then expand to an unspecified macro
+name that takes one or more late arguments, appends those extra
+arguments to the earlier, and finally invokes @var{macro} with the
 resulting list of arguments.
 @end deffn
 
 A demonstration of currying makes the intent of this macro a little more
 obvious.  The macro @code{stack_foreach} mentioned earlier is an example
 of a context that provides exactly one argument to a macro name.  But
-coupled with currying, we can invoke @code{reverse} with two arguments
-for each definition of a macro stack.  This example uses the file
-@file{m4-@value{VERSION}/@/examples/@/curry.m4} included in the
+coupled with currying, we can invoke @code{reverse} with two or more
+arguments for each definition of a macro stack (that is, we factor out
+the early argument @code{`4'} and couple it with a different late
+argument for each member of the stack @code{a}).  This example uses the
+file @file{m4-@value{VERSION}/@/examples/@/curry.m4} included in the
 distribution.
 
 @comment examples
@@ -3666,14 +3671,18 @@ pushdef(`a', `1')pushdef(`a', `2')pushdef(`a', `3')
 @result{}
 stack_foreach(`a', `:curry(`reverse', `4')')
 @result{}:1, 4:2, 4:3, 4
+stack_foreach(`a', `:curry(`reverse', `4', `5')')
+@result{}:1, 5, 4:2, 5, 4:3, 5, 4
 curry(`curry', `reverse', `1')(`2')(`3')
+@result{}3, 2, 1
+curry(`reverse', `1')(`2', `3')
 @result{}3, 2, 1
 @end example
 
 Now for the implementation.  Notice how @code{curry} leaves off with a
 macro name but no open parenthesis, while still in the middle of
 collecting arguments for @samp{$1}.  The macro @code{_curry} is the
-helper macro that takes one argument, then adds it to the list and
+helper macro that takes one or more late arguments, then adds to the list and
 finally supplies the closing parenthesis.  The use of a comma inside the
 @code{shift} call allows currying to also work for a macro that takes
 one argument, although it often makes more sense to invoke that macro
@@ -3684,11 +3693,27 @@ directly rather than going through @code{curry}.
 $ @kbd{m4 -I examples}
 undivert(`curry.m4')dnl
 @result{}divert(`-1')
-@result{}# curry(macro, args)
-@result{}# Expand to a macro call that takes one argument, then invoke
-@result{}# macro(args, extra).
-@result{}define(`curry', `$1(shift($@@,)_$0')
-@result{}define(`_curry', ``$1')')
+@result{}# curry(macro, args...)
+@result{}# Perform partial argument application on the given macro.  This
+@result{}# expands to an unspecified macro name that accepts one or more extra
+@result{}# arguments, and appends those to the args supplied to the original
+@result{}# curry call as the overall set of arguments to pass to macro.  That
+@result{}# is, curry(`macro', args1...)(args2...) is the same as invoking
+@result{}# macro(args1..., args2...).
+@result{}#
+@result{}# Most often, argument currying comes in handy when given a context
+@result{}# that normally takes a macro name to call with one argument, but
+@result{}# where you want to combine that variable argument with other fixed
+@result{}# arguments to forward to a macro that takes multiple arguments.  For
+@result{}# example, given a "foreach" macro that calls its first argument once
+@result{}# for each successive argument, "foreach(`curry(`mult', 3)', 1, 2, 3)"
+@result{}# would behave the same as "mult(3, 1), mult(3, 2), mult(3, 3)".
+@result{}#
+@result{}# It is also possible to create a named function curry.  For example:
+@result{}# define(`mult3', `curry(`mult', 3)($1)')
+@result{}# Later use of mult3(value) will compute the same as mult(3, value).
+@result{}define(`curry', `$1(shift($@@,)_curry')
+@result{}define(`_curry', `$@@)')
 @result{}divert`'dnl
 @end example
 
@@ -4485,6 +4510,52 @@ changequote(`"', `"')
 @result{}
 "hi"hi"hi"
 @result{}hiHIhi
+@end example
+
+During macro expansion, instances of @code{$@@} in the macro's
+definition will use the quotation strings that are in effect at the end
+of argument collection, even if this is different than the quotation
+strings in effect when the macro was defined.  When combined with
+@code{translit} (@pxref{Translit}), this can be exploited for splitting
+a string containing multiple instances of a single-byte separator into a
+macro call on each token of the string with linear scaling (a naive loop
+that uses @code{index} to search for the first instance of the
+separator, followed by @code{substr} to process the rest of the input
+string, scales quadratically, since each iteration of the loop can only
+process one substring before re-processing an average of half of the
+overall input to get to the next substring, instead of getting at all
+substrings in a single pass).  However, note that this trick cannot
+prevent premature expansion of tokens within the string.
+
+@example
+define(`some', `several')
+@result{}
+define(`text', `long.string.with.some.separators')
+@result{}
+define(`display', ``<$1>'')
+@result{}
+display(text)
+@result{}<long.string.with.several.separators>
+display(defn(`text'))
+@result{}<long.string.with.some.separators>
+dnl quotes are still `' at the time requote is defined:
+define(`requote', `"[$@@]')
+@result{}
+define(`tokenized', requote(translit(defn(`text'), `.',
+changequote(`"[', `]')"[,])))
+@result{}
+dnl but quotes are "[] at the time $@@ in requote is computed
+changequote
+@result{}
+dnl quotes are back to `', yet the content of tokenized still has "[]
+dnl however, this form of tokenizing already expanded "some"
+tokenized
+@result{}"[long],"[string],"[with],"[several],"[separators]
+define(`a', ` display(`$1')')
+@result{}
+dnl now it is possible to call `a' on each token
+translit(defn(`tokenized'), `"[],', `a()')
+@result{} <long> <string> <with> <several> <separators>
 @end example
 
 @ignore
@@ -6373,6 +6444,9 @@ eval(`++0')
 eval(`0 |= 1')
 @error{}m4:stdin:3: invalid operator in eval: 0 |= 1
 @result{}
+eval(`(1 += 2)')
+@error{}m4:stdin:4: invalid operator in eval: (1 += 2)
+@result{}
 @end example
 
 Note that some older @code{m4} implementations use @samp{^} as an
@@ -6452,6 +6526,22 @@ eval(`4 ** -2')
 @result{}
 @end example
 
+@ignore
+@comment This test makes sure the algorithm is fast, but does not
+@comment need to be displayed as-is in the manual.
+
+@example
+eval(`3**2000000000')
+@result{}632360961
+define(`loop', `ifelse(`$1', `1000', `pass',
+`loop(eval($1+!!(3**2000000000)))')')loop(0)
+@result{}pass
+define(`check', `ifelse(`$1', `100', `pass', `$2', eval(-3**$1),
+`check(incr($1), eval(-3*$2))', `oops')')check(0, 1)
+@result{}pass
+@end example
+@end ignore
+
 Within @var{expression}, (but not @var{radix} or @var{width}), numbers
 without a special prefix are decimal.  A simple @samp{0} prefix
 introduces an octal number.  @samp{0x} introduces a hexadecimal number.
@@ -6490,10 +6580,19 @@ square(`9')
 @result{}81
 square(square(`5')` + 1')
 @result{}676
+eval(`1+')
+@error{}m4:stdin:10: bad expression in eval: 1+
+@result{}
+eval(`0x')
+@error{}m4:stdin:11: invalid number in eval: 0x
+@result{}
+eval(`01239')
+@error{}m4:stdin:12: invalid number in eval: 01239
+@result{}
 define(`foo', `666')
 @result{}
 eval(`foo / 6')
-@error{}m4:stdin:11: bad expression in eval (bad input): foo / 6
+@error{}m4:stdin:14: bad expression in eval (bad input): foo / 6
 @result{}
 eval(foo / 6)
 @result{}111
@@ -8387,7 +8486,7 @@ foreachq(`x', ```active'', ``active''', `<x>
 @comment examples
 @comment options: -Dlimit=10 -Dverbose
 @example
-$ @kbd {m4 -I examples -Dlimit=10 -Dverbose}
+$ @kbd{m4 -I examples -Dlimit=10 -Dverbose}
 include(`loop.m4')dnl
 @result{} 1 2 3 4 5 6 7 8 9 10
 @end example
@@ -8397,7 +8496,7 @@ include(`loop.m4')dnl
 @comment examples
 @comment options: -Dlimit=10 -Dverbose -Dalt
 @example
-$ @kbd {m4 -I examples -Dlimit=10 -Dverbose -Dalt}
+$ @kbd{m4 -I examples -Dlimit=10 -Dverbose -Dalt}
 include(`loop.m4')dnl
 @result{} 1 2 3 4 5 6 7 8 9 10
 @end example
@@ -8407,7 +8506,7 @@ include(`loop.m4')dnl
 @comment examples
 @comment options: -Dlimit=10 -Dverbose -Dalt=4
 @example
-$ @kbd {m4 -I examples -Dlimit=10 -Dverbose -Dalt=4}
+$ @kbd{m4 -I examples -Dlimit=10 -Dverbose -Dalt=4}
 include(`loop.m4')dnl
 @result{} 1 2 3 4 5 6 7 8 9 10
 @end example
@@ -8415,14 +8514,14 @@ include(`loop.m4')dnl
 @comment examples
 @comment options: -Dlimit=2500 -Dalt=4
 @example
-$ @kbd {m4 -I examples -Dlimit=2500 -Dalt=4}
+$ @kbd{m4 -I examples -Dlimit=2500 -Dalt=4}
 include(`loop.m4')dnl
 @end example
 
 @comment examples
 @comment options: -Dlimit=10000 -Dalt=4
 @example
-$ @kbd {m4 -I examples -Dlimit=10000 -Dalt=4}
+$ @kbd{m4 -I examples -Dlimit=10000 -Dalt=4}
 define(`foo', `divert`'len(popdef(`_foreachq')_foreachq($@@))')dnl
 define(`debug', `pushdef(`_foreachq', defn(`foo'))')
 @result{}
@@ -8531,7 +8630,7 @@ undivert(`stack_sep.m4')dnl
 
 @comment examples
 @example
-$ @kbd {m4 -I examples}
+$ @kbd{m4 -I examples}
 include(`forloop3.m4')include(`stack_sep.m4')dnl
 forloop(`i', `1', `10000', `pushdef(`s', i)')
 @result{}
