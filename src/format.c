@@ -23,6 +23,10 @@
 
 #include "m4.h"
 
+#include "minmax.h"
+
+#include <stdckdint.h>
+
 /* Simple varargs substitute.  We assume int and unsigned int are the
    same size; likewise for long and unsigned long.  */
 
@@ -32,46 +36,56 @@ arg_int (const char *str)
 {
   char *endp;
   long value;
-  size_t len = strlen (str);
 
-  if (!len)
+  if (!*str)
     {
       M4ERROR ((warning_status, 0, _("empty string treated as 0")));
       return 0;
     }
   errno = 0;
   value = strtol (str, &endp, 10);
-  if (endp - str - len)
-    M4ERROR ((warning_status, 0, _("non-numeric argument %s"), str));
+  bool overflow = errno == ERANGE;
+  if (*endp)
+    M4ERROR ((warning_status, 0, _("non-numeric argument %s"), squote (str)));
   else if (c_isspace (*str))
     M4ERROR ((warning_status, 0, _("leading whitespace ignored")));
-  else if (errno == ERANGE || (int) value != value)
-    M4ERROR ((warning_status, 0, _("numeric overflow detected")));
-  return value;
+  int result;
+  overflow |= ckd_add (&result, value, 0);
+  if (overflow)
+    {
+      M4ERROR ((warning_status, 0, _("numeric overflow detected")));
+      /* Return the closest extremum: this is the most useful when debugging
+         width and precision overflow, and is good enough for %c.  */
+      return value < 0 ? INT_MIN : INT_MAX;
+    }
+  return result;
 }
 
-/* Parse STR as a long, reporting warnings.  */
-static long
+/* Parse STR as an ival, reporting warnings.  Return the ival and an
+   overflow indicator that is null if no overflow occurred, the end of
+   the parsed number otherwise.  */
+static struct arg_long { ival val; char const *overflow; }
 arg_long (const char *str)
 {
   char *endp;
-  long value;
-  size_t len = strlen (str);
 
-  if (!len)
+  if (!*str)
     {
       M4ERROR ((warning_status, 0, _("empty string treated as 0")));
-      return 0L;
+      return (struct arg_long) {0};
     }
   errno = 0;
-  value = strtol (str, &endp, 10);
-  if (endp - str - len)
-    M4ERROR ((warning_status, 0, _("non-numeric argument %s"), str));
+  iival value = strtoiival (str, &endp, 10);
+  bool overflow = errno == ERANGE;
+  if (*endp)
+    M4ERROR ((warning_status, 0, _("non-numeric argument %s"), squote (str)));
   else if (c_isspace (*str))
     M4ERROR ((warning_status, 0, _("leading whitespace ignored")));
-  else if (errno == ERANGE)
+  ival result;
+  overflow |= ckd_add (&result, value, 0);
+  if (overflow)
     M4ERROR ((warning_status, 0, _("numeric overflow detected")));
-  return value;
+  return (struct arg_long) {result, overflow ? endp : NULL};
 }
 
 /* Parse STR as a double, reporting warnings.  */
@@ -80,39 +94,74 @@ arg_double (const char *str)
 {
   char *endp;
   double value;
-  size_t len = strlen (str);
 
-  if (!len)
+  if (!*str)
     {
       M4ERROR ((warning_status, 0, _("empty string treated as 0")));
       return 0.0;
     }
   errno = 0;
   value = strtod (str, &endp);
-  if (endp - str - len)
-    M4ERROR ((warning_status, 0, _("non-numeric argument %s"), str));
+  bool overflow = errno == ERANGE;
+  if (*endp)
+    M4ERROR ((warning_status, 0, _("non-numeric argument %s"), squote (str)));
   else if (c_isspace (*str))
     M4ERROR ((warning_status, 0, _("leading whitespace ignored")));
-  else if (errno == ERANGE)
+  if (overflow)
     M4ERROR ((warning_status, 0, _("numeric overflow detected")));
   return value;
 }
 
 #define ARG_INT(argc, argv) \
-        ((argc == 0) ? 0 : \
-         (--argc, argv++, arg_int (TOKEN_DATA_TEXT (argv[-1]))))
-
-#define ARG_LONG(argc, argv) \
-        ((argc == 0) ? 0 : \
-         (--argc, argv++, arg_long (TOKEN_DATA_TEXT (argv[-1]))))
+  (((argc) == 0) ? 0 : \
+   ((argc)--, arg_int (TOKEN_DATA_TEXT (*(argv)++))))
 
 #define ARG_STR(argc, argv) \
-        ((argc == 0) ? "" : \
-         (--argc, argv++, TOKEN_DATA_TEXT (argv[-1])))
+  (((argc) == 0) ? "" : \
+   ((argc)--, TOKEN_DATA_TEXT (*(argv)++)))
 
 #define ARG_DOUBLE(argc, argv) \
-        ((argc == 0) ? 0 : \
-         (--argc, argv++, arg_double (TOKEN_DATA_TEXT (argv[-1]))))
+  (((argc) == 0) ? 0 : \
+   ((argc)--, arg_double (TOKEN_DATA_TEXT (*(argv)++))))
+
+/* Parse a width or precision from FMT's prefix.
+   If FMT[-1] == '.' this is a precision instead of a width.
+   If FMT[0] == '*', get it from the next arg specified by *ARGC and *ARGV;
+   otherwise, parse an optional unsigned decimal prefix of FMT.
+   If the integer is too large, warn about overflow.
+   Set *N to the value, or to zero if the prefix is empty.
+   Return the address of the first byte after the prefix.  */
+static char const *
+parse_width (char const *fmt, idx_t *argc, token_data ***argv, int *n)
+{
+  if (*fmt == '*')
+    {
+      *n = ARG_INT (*argc, *argv);
+      return fmt + 1;
+    }
+  else
+    {
+      char const *f = fmt;
+      *n = 0;
+      bool v = false;
+      for (; c_isdigit (*f); f++)
+        {
+          v |= ckd_mul (n, *n, 10);
+          v |= ckd_add (n, *n, *f - '0');
+        }
+      if (v)
+        {
+          int w = ckd_add (&w, f - fmt, 0) ? INT_MAX : w;
+          M4ERROR ((warning_status, 0,
+                    _(fmt[-1] == '.'
+                      ? "integer overflow in format precision %.*s"
+                      : "integer overflow in format width %.*s"),
+                    w, fmt));
+          *n = INT_MAX;
+        }
+      return f;
+    }
+}
 
 
 /*------------------------------------------------------------------.
@@ -124,11 +173,11 @@ arg_double (const char *str)
 `------------------------------------------------------------------*/
 
 void
-expand_format (struct obstack *obs, int argc, token_data **argv)
+expand_format (struct obstack *obs, idx_t argc, token_data **argv)
 {
   const char *f;                /* format control string */
   const char *fmt;              /* position within f */
-  char fstart[] = "%'+- 0#*.*hhd";      /* current format spec */
+  char fstart[sizeof "%'+- 0#*.*"PRIdIVAL"d"]; /* current format spec */
   char *p;                      /* position within fstart */
   unsigned char c;              /* a simple character */
 
@@ -148,20 +197,18 @@ expand_format (struct obstack *obs, int argc, token_data **argv)
   /* Precision specifiers.  */
   int width;                    /* minimum field width */
   int prec;                     /* precision */
-  char lflag;                   /* long flag */
 
-  /* Specifiers we are willing to accept.  ok['x'] implies %x is ok.
+  /* Specifiers we are willing to accept.  ok['x' - OKMIN] implies %x is ok.
      Various modifiers reduce the set, in order to avoid undefined
      behavior in printf.  */
-  char ok[128];
+  enum { OKMIN = MIN ('a', 'A'), OKMAX = MAX ('x', 'X') };
+  char ok[OKMAX - OKMIN + 1] = {0};
 
   /* Buffer and stuff.  */
   char *str;                    /* malloc'd buffer of formatted text */
-  enum
-  { CHAR, INT, LONG, DOUBLE, STR } datatype;
 
+  fstart[0] = '%';
   f = fmt = ARG_STR (argc, argv);
-  memset (ok, 0, sizeof ok);
   while (1)
     {
       const char *percent = strchr (fmt, '%');
@@ -181,10 +228,11 @@ expand_format (struct obstack *obs, int argc, token_data **argv)
         }
 
       p = fstart + 1;           /* % */
-      lflag = 0;
-      ok['a'] = ok['A'] = ok['c'] = ok['d'] = ok['e'] = ok['E']
-        = ok['f'] = ok['F'] = ok['g'] = ok['G'] = ok['i'] = ok['o']
-        = ok['s'] = ok['u'] = ok['x'] = ok['X'] = 1;
+      ok['a' - OKMIN] = ok['A' - OKMIN] = ok['c' - OKMIN] = ok['d' - OKMIN]
+        = ok['e' - OKMIN] = ok['E' - OKMIN] = ok['f' - OKMIN] = ok['F' - OKMIN]
+        = ok['g' - OKMIN] = ok['G' - OKMIN] = ok['i' - OKMIN] = ok['o' - OKMIN]
+        = ok['s' - OKMIN] = ok['u' - OKMIN] = ok['x' - OKMIN] = ok['X' - OKMIN]
+        = 1;
 
       /* Parse flags.  */
       flags = 0;
@@ -193,28 +241,36 @@ expand_format (struct obstack *obs, int argc, token_data **argv)
           switch (*fmt)
             {
             case '\'':         /* thousands separator */
-              ok['a'] = ok['A'] = ok['c'] = ok['e'] = ok['E']
-                = ok['o'] = ok['s'] = ok['x'] = ok['X'] = 0;
+              ok['a' - OKMIN] = ok['A' - OKMIN] = ok['c' - OKMIN]
+                = ok['e' - OKMIN] = ok['E' - OKMIN] = ok['o' - OKMIN]
+                = ok['s' - OKMIN] = ok['x' - OKMIN] = ok['X' - OKMIN]
+                = 0;
               flags |= THOUSANDS;
               break;
 
             case '+':          /* mandatory sign */
-              ok['c'] = ok['o'] = ok['s'] = ok['u'] = ok['x'] = ok['X'] = 0;
+              ok['c' - OKMIN] = ok['o' - OKMIN] = ok['s' - OKMIN]
+                = ok['u' - OKMIN] = ok['x' - OKMIN] = ok['X' - OKMIN]
+                = 0;
               flags |= PLUS;
               break;
 
             case ' ':          /* space instead of positive sign */
-              ok['c'] = ok['o'] = ok['s'] = ok['u'] = ok['x'] = ok['X'] = 0;
+              ok['c' - OKMIN] = ok['o' - OKMIN] = ok['s' - OKMIN]
+                = ok['u' - OKMIN] = ok['x' - OKMIN] = ok['X' - OKMIN]
+                = 0;
               flags |= SPACE;
               break;
 
             case '0':          /* zero padding */
-              ok['c'] = ok['s'] = 0;
+              ok['c' - OKMIN] = ok['s' - OKMIN] = 0;
               flags |= ZERO;
               break;
 
             case '#':          /* alternate output */
-              ok['c'] = ok['d'] = ok['i'] = ok['s'] = ok['u'] = 0;
+              ok['c' - OKMIN] = ok['d' - OKMIN] = ok['i' - OKMIN]
+                = ok['s' - OKMIN] = ok['u' - OKMIN]
+                = 0;
               flags |= ALT;
               break;
 
@@ -243,85 +299,58 @@ expand_format (struct obstack *obs, int argc, token_data **argv)
 
       /* Minimum field width; an explicit 0 is the same as not giving
          the width.  */
-      width = 0;
       *p++ = '*';
-      if (*fmt == '*')
-        {
-          width = ARG_INT (argc, argv);
-          fmt++;
-        }
-      else
-        while (c_isdigit (*fmt))
-          {
-            width = 10 * width + *fmt - '0';
-            fmt++;
-          }
+      fmt = parse_width (fmt, &argc, &argv, &width);
 
       /* Maximum precision; an explicit negative precision is the same
          as not giving the precision.  A lone '.' is a precision of 0.  */
-      prec = -1;
       *p++ = '.';
       *p++ = '*';
       if (*fmt == '.')
         {
-          ok['c'] = 0;
-          if (*(++fmt) == '*')
-            {
-              prec = ARG_INT (argc, argv);
-              ++fmt;
-            }
-          else
-            {
-              prec = 0;
-              while (c_isdigit (*fmt))
-                {
-                  prec = 10 * prec + *fmt - '0';
-                  fmt++;
-                }
-            }
+          ok['c' - OKMIN] = 0;
+          fmt = parse_width (fmt + 1, &argc, &argv, &prec);
         }
+      else
+        prec = -1;
 
-      /* Length modifiers.  We don't yet recognize ll, j, t, or z.  */
-      if (*fmt == 'l')
-        {
-          *p++ = 'l';
-          lflag = 1;
-          fmt++;
-          ok['c'] = ok['s'] = 0;
-        }
-      else if (*fmt == 'h')
-        {
-          *p++ = 'h';
-          fmt++;
-          if (*fmt == 'h')
-            {
-              *p++ = 'h';
-              fmt++;
-            }
-          ok['a'] = ok['A'] = ok['c'] = ok['e'] = ok['E'] = ok['f'] = ok['F']
-            = ok['g'] = ok['G'] = ok['s'] = 0;
-        }
+      /* For partial backward compatibility, quietly ignore the rarely used
+         length modifiers "h", "hh" and "l", which were accepted by m4
+         1.4.21 and earlier but had undefined behavior on picky platforms.
+         This compatibility hack is undocumented.  */
+      fmt += fmt[0] == 'h' ? 1 + (fmt[1] == 'h') : fmt[0] == 'l';
 
       c = *fmt++;
-      if (sizeof ok <= c || !ok[c])
+      if (! (OKMIN <= c && c <= OKMAX && ok[c - OKMIN]))
         {
           M4ERROR ((warning_status, 0,
-                    _("Warning: unrecognized specifier in `%s'"), f));
+                    _("Warning: unrecognized specifier in %s"), squote (f)));
           if (c == '\0')
             fmt--;
           continue;
         }
 
-      /* Specifiers.  We don't yet recognize C, S, n, or p.  */
+      /* Our constructed format string in fstart is safe.  */
+#if _GL_GNUC_PREREQ (4, 6) || defined __clang__
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#endif
+
+      /* Specifiers.  We don't recognize C, S, n, or p.  */
       switch (c)
         {
         case 'c':
-          datatype = CHAR;
           p -= 2;               /* %.*c is undefined, so undo the '.*'.  */
+          *p++ = 'c';
+          *p = '\0';
+          str = xasprintf (fstart, width, ARG_INT (argc, argv));
           break;
 
         case 's':
-          datatype = STR;
+        case_s:
+          *p++ = 's';
+          *p = '\0';
+          str = xasprintf (fstart, width, prec, ARG_STR (argc, argv));
           break;
 
         case 'd':
@@ -330,7 +359,24 @@ expand_format (struct obstack *obs, int argc, token_data **argv)
         case 'x':
         case 'X':
         case 'u':
-          datatype = lflag ? LONG : INT;
+          ;
+          struct arg_long arg = {0};
+          if (argc)
+            {
+              arg = arg_long (TOKEN_DATA_TEXT (*argv));
+              if (arg.overflow)
+                {
+                  /* Numeric overflow was detected.  Format as a string;
+                     this loses less information when debugging.  */
+                  prec = MIN (INT_MAX, arg.overflow - TOKEN_DATA_TEXT (*argv));
+                  goto case_s;
+                }
+              argc--, argv++;
+            }
+          p = mempcpy (p, PRIdIVAL, sizeof PRIdIVAL - 2);
+          *p++ = c;
+          *p = '\0';
+          str = xasprintf (fstart, width, prec, arg.val);
           break;
 
         case 'a':
@@ -341,47 +387,15 @@ expand_format (struct obstack *obs, int argc, token_data **argv)
         case 'F':
         case 'g':
         case 'G':
-          datatype = DOUBLE;
-          break;
-
-        default:
-          abort ();
-        }
-      *p++ = c;
-      *p = '\0';
-
-      /* Our constructed format string in fstart is safe.  */
-#if _GL_GNUC_PREREQ (4, 3) || defined __clang__
-# pragma GCC diagnostic push
-# pragma GCC diagnostic ignored "-Wformat-nonliteral"
-#endif
-
-      switch (datatype)
-        {
-        case CHAR:
-          str = xasprintf (fstart, width, ARG_INT (argc, argv));
-          break;
-
-        case INT:
-          str = xasprintf (fstart, width, prec, ARG_INT (argc, argv));
-          break;
-
-        case LONG:
-          str = xasprintf (fstart, width, prec, ARG_LONG (argc, argv));
-          break;
-
-        case DOUBLE:
+          *p++ = c;
+          *p = '\0';
           str = xasprintf (fstart, width, prec, ARG_DOUBLE (argc, argv));
           break;
 
-        case STR:
-          str = xasprintf (fstart, width, prec, ARG_STR (argc, argv));
-          break;
-
         default:
           abort ();
         }
-#if _GL_GNUC_PREREQ (4, 3) || defined __clang__
+#if _GL_GNUC_PREREQ (4, 6) || defined __clang__
 # pragma GCC diagnostic pop
 #endif
 

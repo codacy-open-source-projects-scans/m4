@@ -25,11 +25,16 @@
 #include "m4.h"
 
 #include "execute.h"
+#include "inttostr.h"
+#include "intprops.h"
 #include "memchr2.h"
+#include "minmax.h"
 #include "progname.h"
 #include "regex.h"
 #include "spawn-pipe.h"
 #include "wait-process.h"
+
+#include <stdckdint.h>
 
 #define ARG(i) (argc > (i) ? TOKEN_DATA_TEXT (argv[i]) : "")
 #define ARGLEN(i) (argc > (i) ? TOKEN_DATA_LEN (argv[i]) : 0)
@@ -39,7 +44,7 @@
    builtin.  */
 
 #define DECLARE(name) \
-  static void name (struct obstack *, int, token_data **)
+  static void name (struct obstack *, idx_t, token_data **)
 
 DECLARE (m4___file__);
 DECLARE (m4___line__);
@@ -72,7 +77,6 @@ DECLARE (m4_indir);
 DECLARE (m4_len);
 DECLARE (m4_m4exit);
 DECLARE (m4_m4wrap);
-DECLARE (m4_maketemp);
 DECLARE (m4_mkstemp);
 DECLARE (m4_patsubst);
 DECLARE (m4_popdef);
@@ -126,7 +130,7 @@ static builtin const builtin_tab[] = {
   {"len", false, false, true, m4_len},
   {"m4exit", false, false, false, m4_m4exit},
   {"m4wrap", false, false, true, m4_m4wrap},
-  {"maketemp", false, false, true, m4_maketemp},
+  {"maketemp", true, false, true, m4_mkstemp},
   {"mkstemp", false, false, true, m4_mkstemp},
   {"patsubst", true, false, true, m4_patsubst},
   {"popdef", false, false, true, m4_popdef},
@@ -197,7 +201,7 @@ find_builtin_by_name (const char *name)
   const builtin *bp;
 
   for (bp = &builtin_tab[0]; bp->name != NULL; bp++)
-    if (STREQ (bp->name, name))
+    if (streq (bp->name, name))
       return bp;
   return bp + 1;
 }
@@ -213,10 +217,9 @@ define_builtin (const char *name, const builtin *bp, symbol_lookup mode)
   symbol *sym;
 
   sym = lookup_symbol (name, strlen (name), mode);
-  SYMBOL_TYPE (sym) = TOKEN_FUNC;
+  set_token_data_func (symbol_token_data (sym), bp->func);
   SYMBOL_MACRO_ARGS (sym) = bp->groks_macro_args;
   SYMBOL_BLIND_NO_ARGS (sym) = bp->blind_if_no_args;
-  SYMBOL_FUNC (sym) = bp->func;
 }
 
 /* Storage for the compiled regular expression of
@@ -261,8 +264,8 @@ set_macro_sequence (const char *regexp)
   msg = re_compile_pattern (regexp, strlen (regexp), &macro_sequence_buf);
   if (msg != NULL)
     m4_failure (0,
-                _("--warn-macro-sequence: bad regular expression `%s': %s"),
-                regexp, msg);
+                _("--warn-macro-sequence: bad regular expression %s: %s"),
+                squote (regexp), msg);
   re_set_registers (&macro_sequence_buf, &macro_sequence_regs,
                     macro_sequence_regs.num_regs, macro_sequence_regs.start,
                     macro_sequence_regs.end);
@@ -281,32 +284,22 @@ free_macro_sequence (void)
 
 /*-----------------------------------------------------------------.
 | Define a predefined or user-defined macro, with name NAME, and   |
-| expansion TEXT.  MODE destinguishes between the "define" and the |
+| expansion TEXT.  MODE distinguishes between the "define" and the |
 | "pushdef" case.  It is also used from main.                      |
 `-----------------------------------------------------------------*/
 
 void
-define_user_macro (const char *name, int name_len, const char *text,
-                   size_t text_len, symbol_lookup mode)
+define_user_macro (const char *name, idx_t name_len, const char *text,
+                   idx_t text_len, symbol_lookup mode)
 {
   symbol *s;
-  char *defn = xmemdup0 (text ? text : "", text_len);
-
-  if (text_len > INT_MAX)
-    {
-      M4ERROR ((warning_status, 0,
-                _("truncating macro `%s' definition to INT_MAX bytes"),
-                name));
-      text_len = INT_MAX;
-    }
+  char *defn = ximemdup0 (text ? text : "", text_len);
 
   s = lookup_symbol (name, name_len, mode);
   if (SYMBOL_TYPE (s) == TOKEN_TEXT)
     free (SYMBOL_TEXT (s));
 
-  SYMBOL_TYPE (s) = TOKEN_TEXT;
-  SYMBOL_TEXT (s) = defn;
-  SYMBOL_TEXT_LEN (s) = text_len;
+  set_token_data_text (symbol_token_data (s), defn, text_len);
 
   /* Implement --warn-macro-sequence.  */
   if (macro_sequence_inuse && text)
@@ -330,15 +323,16 @@ define_user_macro (const char *name, int name_len, const char *text,
           tmp = defn[offset];
           defn[offset] = '\0';
           M4ERROR ((warning_status, 0,
-                    _("Warning: definition of `%s' contains sequence `%s'"),
-                    name, defn + macro_sequence_regs.start[0]));
+                    _("Warning: definition of %s contains sequence %s"),
+                    squote_n (0, name),
+                    squote_n (1, defn + macro_sequence_regs.start[0])));
           defn[offset] = tmp;
 
         }
       if (offset == -2)
         M4ERROR ((warning_status, 0,
-                  _("error checking --warn-macro-sequence for macro `%s'"),
-                  name));
+                  _("error checking --warn-macro-sequence for macro %s"),
+                  squote (name)));
     }
 }
 
@@ -385,39 +379,39 @@ builtin_init (void)
 | Give friendly warnings if a builtin macro is passed an             |
 | inappropriate number of arguments.  NAME is the macro name for     |
 | messages, ARGC is actual number of arguments, MIN is the minimum   |
-| number of acceptable arguments, negative if not applicable, MAX is |
-| the maximum number, negative if not applicable.                    |
+| number of acceptable arguments, MAX is the maximum number.         |
 `-------------------------------------------------------------------*/
 
 static bool
-bad_argc (token_data *name, int argc, int min, int max)
+bad_argc (token_data *name, idx_t argc, idx_t min, idx_t max)
 {
   bool isbad = false;
 
-  if (min > 0 && argc < min)
+  if (argc < min)
     {
       if (!suppress_warnings)
         M4ERROR ((warning_status, 0,
-                  _("Warning: too few arguments to builtin `%s'"),
-                  TOKEN_DATA_TEXT (name)));
+                  _("Warning: too few arguments to builtin %s"),
+                  squote (TOKEN_DATA_TEXT (name))));
       isbad = true;
     }
-  else if (max > 0 && argc > max && !suppress_warnings)
+  else if (max < argc && !suppress_warnings)
     M4ERROR ((warning_status, 0,
-              _("Warning: excess arguments to builtin `%s' ignored"),
-              TOKEN_DATA_TEXT (name)));
+              _("Warning: excess arguments to builtin %s ignored"),
+              squote (TOKEN_DATA_TEXT (name))));
 
   return isbad;
 }
 
-/*-----------------------------------------------------------------.
-| The function numeric_arg () converts ARG to an int pointed to by |
-| VALUEP.  If the conversion fails, print error message for macro  |
-| MACRO.  Return true iff conversion succeeds.                     |
-`-----------------------------------------------------------------*/
+/*--------------------------------------------------------------.
+| In macro MACRO, convert ARG to an ival pointed to by VALUEP.  |
+| Diagnose any failure.                                         |
+| Return 0 on failure, 1 on success without overflow,           |
+| -1 (setting *VALUEP to an extreme value) on overflow.         |
+`--------------------------------------------------------------*/
 
-static bool
-numeric_arg (token_data *macro, const char *arg, int *valuep)
+static signed char
+numeric_arg (token_data *macro, const char *arg, ival *valuep)
 {
   char *endp;
 
@@ -425,87 +419,49 @@ numeric_arg (token_data *macro, const char *arg, int *valuep)
     {
       *valuep = 0;
       M4ERROR ((warning_status, 0,
-                _("empty string treated as 0 in builtin `%s'"),
-                TOKEN_DATA_TEXT (macro)));
+                _("empty string treated as 0 in builtin %s"),
+                squote (TOKEN_DATA_TEXT (macro))));
     }
   else
     {
       errno = 0;
-      *valuep = strtol (arg, &endp, 10);
+      iival value = strtoiival (arg, &endp, 10);
       if (*endp != '\0')
         {
           M4ERROR ((warning_status, 0,
-                    _("non-numeric argument to builtin `%s'"),
-                    TOKEN_DATA_TEXT (macro)));
-          return false;
+                    _("non-numeric argument to builtin %s"),
+                    squote (TOKEN_DATA_TEXT (macro))));
+          return 0;
         }
+      bool range_error = errno == ERANGE;
       if (c_isspace (*arg))
         M4ERROR ((warning_status, 0,
-                  _("leading whitespace ignored in builtin `%s'"),
-                  TOKEN_DATA_TEXT (macro)));
-      else if (errno == ERANGE)
-        M4ERROR ((warning_status, 0,
-                  _("numeric overflow detected in builtin `%s'"),
-                  TOKEN_DATA_TEXT (macro)));
+                  _("leading whitespace ignored in builtin %s"),
+                  squote (TOKEN_DATA_TEXT (macro))));
+      if (ckd_add (valuep, value, 0)
+	  || *valuep != toival (*valuep) || range_error)
+        {
+          M4ERROR ((warning_status, 0,
+                    _("numeric overflow detected in builtin %s"),
+                    squote (TOKEN_DATA_TEXT (macro))));
+          *valuep = value < 0 ? IVAL_MIN : IVAL_MAX;
+          return -1;
+        }
     }
-  return true;
+  return 1;
 }
 
-/*------------------------------------------------------.
-| The function ntoa () converts VALUE to a signed ASCII |
-| representation in radix RADIX.                        |
-`------------------------------------------------------*/
-
-/* Digits for number to ASCII conversions.  */
-static char const digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
-
-const char *
-ntoa (int32_t value, int radix, const char **end)
-{
-  bool negative;
-  uint32_t uvalue;
-  static char str[256];
-  char *s = &str[sizeof str];
-
-  *--s = '\0';
-  if (end)
-    *end = s;
-
-  if (value < 0)
-    {
-      negative = true;
-      uvalue = -(uint32_t) value;
-    }
-  else
-    {
-      negative = false;
-      uvalue = (uint32_t) value;
-    }
-
-  do
-    {
-      *--s = digits[uvalue % radix];
-      uvalue /= radix;
-    }
-  while (uvalue > 0);
-
-  if (negative)
-    *--s = '-';
-  return s;
-}
-
-/*---------------------------------------------------------------.
-| Format an int VAL, and stuff it into an obstack OBS.  Used for |
-| macros expanding to numbers.                                   |
-`---------------------------------------------------------------*/
+/*---------------------------------------------------.
+| Stuff into OBS the textual representation of VAL.  |
+| Used for macros expanding to numbers.              |
+`---------------------------------------------------*/
 
 static void
-shipout_int (struct obstack *obs, int val)
+shipout_int (struct obstack *obs, ival val)
 {
-  const char *s;
-  const char *e;
-
-  s = ntoa ((int32_t) val, 10, &e);
+  char buf[INT_BUFSIZE_BOUND (ival)];
+  char const *s = ivaltostr (toival (val), buf);
+  char const *e = buf + sizeof buf - 1;
   obstack_grow (obs, s, e - s);
 }
 
@@ -515,10 +471,10 @@ shipout_int (struct obstack *obs, int val)
 `-------------------------------------------------------------------*/
 
 static void
-dump_args (struct obstack *obs, int argc, token_data **argv,
+dump_args (struct obstack *obs, idx_t argc, token_data **argv,
            char sep, bool quoted)
 {
-  int i;
+  idx_t i;
 
   for (i = 1; i < argc; i++)
     {
@@ -535,7 +491,7 @@ dump_args (struct obstack *obs, int argc, token_data **argv,
 /* The rest of this file is code for builtins and expansion of user
    defined macros.  All the functions for builtins have a prototype as:
 
-        void m4_MACRONAME (struct obstack *obs, int argc, char *argv[]);
+        void m4_MACRONAME (struct obstack *obs, idx_t argc, char *argv[]);
 
    The function are expected to leave their expansion on the obstack OBS,
    as an unfinished object.  ARGV is a table of ARGC pointers to the
@@ -553,7 +509,7 @@ dump_args (struct obstack *obs, int argc, token_data **argv,
 `-------------------------------------------------------------------*/
 
 static void
-define_macro (int argc, token_data **argv, symbol_lookup mode)
+define_macro (idx_t argc, token_data **argv, symbol_lookup mode)
 {
   const builtin *bp;
 
@@ -563,7 +519,8 @@ define_macro (int argc, token_data **argv, symbol_lookup mode)
   if (TOKEN_DATA_TYPE (argv[1]) != TOKEN_TEXT)
     {
       M4ERROR ((warning_status, 0,
-                _("Warning: %s: invalid macro name ignored"), ARG (0)));
+                _("Warning: %s: invalid macro name ignored"),
+                squote (ARG (0))));
       return;
     }
 
@@ -596,32 +553,32 @@ define_macro (int argc, token_data **argv, symbol_lookup mode)
 }
 
 static void
-m4_define (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_define (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
   define_macro (argc, argv, SYMBOL_INSERT);
 }
 
 static void
-m4_undefine (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_undefine (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
-  int i;
-  if (bad_argc (argv[0], argc, 2, -1))
+  idx_t i;
+  if (bad_argc (argv[0], argc, 2, IDX_MAX))
     return;
   for (i = 1; i < argc; i++)
     lookup_symbol (ARG (i), ARGLEN (i), SYMBOL_DELETE);
 }
 
 static void
-m4_pushdef (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_pushdef (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
   define_macro (argc, argv, SYMBOL_PUSHDEF);
 }
 
 static void
-m4_popdef (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_popdef (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
-  int i;
-  if (bad_argc (argv[0], argc, 2, -1))
+  idx_t i;
+  if (bad_argc (argv[0], argc, 2, IDX_MAX))
     return;
   for (i = 1; i < argc; i++)
     lookup_symbol (ARG (i), ARGLEN (i), SYMBOL_POPDEF);
@@ -632,7 +589,7 @@ m4_popdef (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `---------------------*/
 
 static void
-m4_ifdef (struct obstack *obs, int argc, token_data **argv)
+m4_ifdef (struct obstack *obs, idx_t argc, token_data **argv)
 {
   symbol *s;
   int result = 0;
@@ -651,7 +608,7 @@ m4_ifdef (struct obstack *obs, int argc, token_data **argv)
 }
 
 static void
-m4_ifelse (struct obstack *obs, int argc, token_data **argv)
+m4_ifelse (struct obstack *obs, idx_t argc, token_data **argv)
 {
   int result;
   token_data *me = argv[0];
@@ -659,11 +616,11 @@ m4_ifelse (struct obstack *obs, int argc, token_data **argv)
   if (argc == 2)
     return;
 
-  if (bad_argc (me, argc, 4, -1))
+  if (bad_argc (me, argc, 4, IDX_MAX))
     return;
   else
     /* Diagnose excess arguments if 5, 8, 11, etc., actual arguments.  */
-    bad_argc (me, (argc + 2) % 3, -1, 1);
+    bad_argc (me, (argc - 1) % 3, 0, 1);
 
   argv++;
   argc--;
@@ -671,7 +628,7 @@ m4_ifelse (struct obstack *obs, int argc, token_data **argv)
   result = 0;
   while (!result)
 
-    if (STREQ (ARG (0), ARG (1)))
+    if (streq (ARG (0), ARG (1)))
       result = 2;
 
     else
@@ -705,7 +662,7 @@ struct dump_symbol_data
 {
   struct obstack *obs;          /* obstack for table */
   symbol **base;                /* base of table */
-  int size;                     /* size of table */
+  idx_t size;                   /* size of table */
 };
 
 static void
@@ -737,10 +694,10 @@ dumpdef_cmp (const void *s1, const void *s2)
 `-------------------------------------------------------------*/
 
 static void
-m4_dumpdef (struct obstack *obs, int argc, token_data **argv)
+m4_dumpdef (struct obstack *obs, idx_t argc, token_data **argv)
 {
   symbol *s;
-  int i;
+  idx_t i;
   struct dump_symbol_data data;
   const builtin *bp;
 
@@ -761,8 +718,8 @@ m4_dumpdef (struct obstack *obs, int argc, token_data **argv)
           if (s != NULL && SYMBOL_TYPE (s) != TOKEN_VOID)
             dump_symbol (s, &data);
           else
-            M4ERROR ((warning_status, 0,
-                      _("undefined macro `%s'"), TOKEN_DATA_TEXT (argv[i])));
+            M4ERROR ((warning_status, 0, _("undefined macro %s"),
+                      squote (TOKEN_DATA_TEXT (argv[i]))));
         }
     }
 
@@ -816,35 +773,32 @@ INTERNAL ERROR: builtin not found in builtin table"));
 `-----------------------------------------------------------------*/
 
 static void
-m4_builtin (struct obstack *obs, int argc, token_data **argv)
+m4_builtin (struct obstack *obs, idx_t argc, token_data **argv)
 {
   const builtin *bp;
   const char *name;
 
-  if (bad_argc (argv[0], argc, 2, -1))
+  if (bad_argc (argv[0], argc, 2, IDX_MAX))
     return;
   if (TOKEN_DATA_TYPE (argv[1]) != TOKEN_TEXT)
     {
       M4ERROR ((warning_status, 0,
-                _("Warning: %s: invalid macro name ignored"), ARG (0)));
+                _("Warning: %s: invalid macro name ignored"),
+                squote (ARG (0))));
       return;
     }
 
   name = ARG (1);
   bp = find_builtin_by_name (name);
   if (bp->func == m4_placeholder)
-    M4ERROR ((warning_status, 0, _("undefined builtin `%s'"), name));
+    M4ERROR ((warning_status, 0, _("undefined builtin %s"), squote (name)));
   else
     {
-      int i;
+      idx_t i;
       if (!bp->groks_macro_args)
         for (i = 2; i < argc; i++)
           if (TOKEN_DATA_TYPE (argv[i]) != TOKEN_TEXT)
-            {
-              TOKEN_DATA_TYPE (argv[i]) = TOKEN_TEXT;
-              TOKEN_DATA_TEXT (argv[i]) = (char *) "";
-              TOKEN_DATA_LEN (argv[i]) = 0;
-            }
+            set_token_data_text (argv[i], (char *) "", 0);
       bp->func (obs, argc - 1, argv + 1);
     }
 }
@@ -857,35 +811,32 @@ m4_builtin (struct obstack *obs, int argc, token_data **argv)
 `-------------------------------------------------------------------*/
 
 static void
-m4_indir (struct obstack *obs, int argc, token_data **argv)
+m4_indir (struct obstack *obs, idx_t argc, token_data **argv)
 {
   symbol *s;
   const char *name;
 
-  if (bad_argc (argv[0], argc, 2, -1))
+  if (bad_argc (argv[0], argc, 2, IDX_MAX))
     return;
   if (TOKEN_DATA_TYPE (argv[1]) != TOKEN_TEXT)
     {
       M4ERROR ((warning_status, 0,
-                _("Warning: %s: invalid macro name ignored"), ARG (0)));
+                _("Warning: %s: invalid macro name ignored"),
+                squote (ARG (0))));
       return;
     }
 
   name = ARG (1);
   s = lookup_symbol (name, ARGLEN (1), SYMBOL_LOOKUP);
   if (s == NULL || SYMBOL_TYPE (s) == TOKEN_VOID)
-    M4ERROR ((warning_status, 0, _("undefined macro `%s'"), name));
+    M4ERROR ((warning_status, 0, _("undefined macro %s"), squote (name)));
   else
     {
-      int i;
+      idx_t i;
       if (!SYMBOL_MACRO_ARGS (s))
         for (i = 2; i < argc; i++)
           if (TOKEN_DATA_TYPE (argv[i]) != TOKEN_TEXT)
-            {
-              TOKEN_DATA_TYPE (argv[i]) = TOKEN_TEXT;
-              TOKEN_DATA_TEXT (argv[i]) = (char *) "";
-              TOKEN_DATA_LEN (argv[i]) = 0;
-            }
+            set_token_data_text (argv[i], (char *) "", 0);
       call_macro (s, argc - 1, argv + 1, obs);
     }
 }
@@ -897,13 +848,13 @@ m4_indir (struct obstack *obs, int argc, token_data **argv)
 `------------------------------------------------------------------*/
 
 static void
-m4_defn (struct obstack *obs, int argc, token_data **argv)
+m4_defn (struct obstack *obs, idx_t argc, token_data **argv)
 {
   symbol *s;
   builtin_func *b;
-  int i;
+  idx_t i;
 
-  if (bad_argc (argv[0], argc, 2, -1))
+  if (bad_argc (argv[0], argc, 2, IDX_MAX))
     return;
 
   assert (0 < argc);
@@ -925,11 +876,14 @@ m4_defn (struct obstack *obs, int argc, token_data **argv)
         case TOKEN_FUNC:
           b = SYMBOL_FUNC (s);
           if (b == m4_placeholder)
-            M4ERROR ((warning_status, 0, _("\
-builtin `%s' requested by frozen file is not supported"), arg));
+            M4ERROR ((warning_status, 0,
+                      _("builtin %s requested by frozen file"
+                        " is not supported"),
+                      squote (arg)));
           else if (argc != 2)
             M4ERROR ((warning_status, 0,
-                      _("Warning: cannot concatenate builtin `%s'"), arg));
+                      _("Warning: cannot concatenate builtin %s"),
+                      squote (arg)));
           else
             push_macro (b);
           break;
@@ -955,7 +909,7 @@ builtin `%s' requested by frozen file is not supported"), arg));
 static int sysval;
 
 static void
-m4_syscmd (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_syscmd (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
   const char *cmd = ARG (1);
   char *xcmd = NULL;
@@ -1000,14 +954,15 @@ m4_syscmd (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
   else
     {
       if (status == 127 && errno)
-        M4ERROR ((warning_status, errno, _("cannot run command `%s'"), cmd));
+        M4ERROR ((warning_status, errno, _("cannot run command %s"),
+                  sh_quote (cmd)));
       sysval = status;
     }
   free (xcmd);
 }
 
 static void
-m4_esyscmd (struct obstack *obs, int argc, token_data **argv)
+m4_esyscmd (struct obstack *obs, idx_t argc, token_data **argv)
 {
   const char *cmd = ARG (1);
   char *xcmd = NULL;
@@ -1050,7 +1005,8 @@ m4_esyscmd (struct obstack *obs, int argc, token_data **argv)
                           NULL, false, true, false, &fd);
   if (child == -1)
     {
-      M4ERROR ((warning_status, errno, _("cannot run command `%s'"), cmd));
+      M4ERROR ((warning_status, errno, _("cannot run command %s"),
+                sh_quote (cmd)));
       sysval = 127;
       return;
     }
@@ -1063,15 +1019,16 @@ m4_esyscmd (struct obstack *obs, int argc, token_data **argv)
 #endif
   if (pin == NULL)
     {
-      M4ERROR ((warning_status, errno, _("cannot run command `%s'"), cmd));
+      M4ERROR ((warning_status, errno, _("cannot run command %s"),
+                sh_quote (cmd)));
       sysval = 127;
       close (fd);
       return;
     }
   while (1)
     {
-      size_t avail = obstack_room (obs);
-      size_t len;
+      idx_t avail = obstack_room (obs);
+      idx_t len;
       if (!avail)
         {
           int ch = getc (pin);
@@ -1098,14 +1055,15 @@ m4_esyscmd (struct obstack *obs, int argc, token_data **argv)
   else
     {
       if (status == 127 && errno)
-        M4ERROR ((warning_status, errno, _("cannot run command `%s'"), cmd));
+        M4ERROR ((warning_status, errno, _("cannot run command %s"),
+                  sh_quote (cmd)));
       sysval = status;
     }
   free (xcmd);
 }
 
 static void
-m4_sysval (struct obstack *obs, int argc MAYBE_UNUSED,
+m4_sysval (struct obstack *obs, idx_t argc MAYBE_UNUSED,
            token_data **argv MAYBE_UNUSED)
 {
   shipout_int (obs, sysval);
@@ -1118,27 +1076,33 @@ m4_sysval (struct obstack *obs, int argc MAYBE_UNUSED,
 `------------------------------------------------------------------*/
 
 static void
-m4_eval (struct obstack *obs, int argc, token_data **argv)
+m4_eval (struct obstack *obs, idx_t argc, token_data **argv)
 {
-  int32_t value = 0;
+  ival value = 0;
   int radix = 10;
-  int min = 1;
-  const char *s;
-  const char *e;
+  ival min = 1;
   const char *expr = ARG (1);
   const char *base = ARG (2);
 
   if (bad_argc (argv[0], argc, 2, 4))
     return;
 
-  if (*base && !numeric_arg (argv[0], base, &radix))
-    return;
-
-  if (radix < 1 || radix > 36)
+  if (*base)
     {
-      M4ERROR ((warning_status, 0,
-                _("radix %d in builtin `%s' out of range"), radix, ARG (0)));
-      return;
+      ival iradix;
+
+      if (!numeric_arg (argv[0], base, &iradix))
+        return;
+
+      if (! (1 <= iradix && iradix <= 36))
+        {
+          M4ERROR ((warning_status, 0,
+                    _("radix %s in builtin %s out of range"), base,
+                    squote (ARG (0))));
+          return;
+        }
+
+      radix = iradix;
     }
 
   if (argc >= 4 && !numeric_arg (argv[0], ARG (3), &min))
@@ -1146,81 +1110,163 @@ m4_eval (struct obstack *obs, int argc, token_data **argv)
   if (min < 0)
     {
       M4ERROR ((warning_status, 0,
-                _("negative width to builtin `%s'"), ARG (0)));
+                _("negative width to builtin %s"), squote (ARG (0))));
       return;
     }
 
   if (!*expr)
     M4ERROR ((warning_status, 0,
-              _("empty string treated as 0 in builtin `%s'"), ARG (0)));
+              _("empty string treated as 0 in builtin %s"), squote (ARG (0))));
   else if (evaluate (expr, &value))
     return;
 
+  bool negative = value < 0;
+
+  /* The negative of the number of value digits to output.  Making it
+     negative avoids overflow if VALUE is minimal && RADIX == 1.  */
+  ival negdigits;
+
+  /* Value buffer when radix != 1.  32 bytes is enough, as the value
+     is at most 32 bits and base 2 is the worst case.  */
+  char valbuf[32];
+
+  /* Pacify GCC 16.1's "'s' may be used before initialized".  */
+  #if _GL_GNUC_PREREQ (4, 7)
+  # pragma GCC diagnostic push
+  # pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+  #endif
+
+  char *s;
+  char *e;
+
+  if (radix == 1)
+    negdigits = negative ? value : -value;
+  else
+    {
+      s = e = valbuf + sizeof valbuf;
+      ival v = value;
+
+      if (radix == 10)
+        {
+          /* Special-case base 10, the most common case.
+             For more comments, see the general case below.  */
+          if (0 <= v && v < 10)
+            {
+              *--s = '0' + v;
+              v = 0;
+            }
+          else if (v < 0)
+            {
+              *--s = '0' - v % radix;
+              v = - (v / radix);
+            }
+
+          for (; 0 < v; v /= radix)
+            *--s = '0' + v % radix;
+        }
+      else
+        {
+          /* Digits for number to ASCII conversions.  */
+          static char const _GL_ATTRIBUTE_NONSTRING digit_array[36] =
+            "0123456789abcdefghijklmnopqrstuvwxyz";
+
+          if (0 <= v && v < radix)
+            {
+              /* Store the only digit; this avoids the need for
+                 dividing, or for special-casing 0 in the loop.  */
+              *--s = digit_array[v];
+              v = 0;
+            }
+          else if (v < 0)
+            {
+              /* Store the low-order digit and set V = abs (V / RADIX);
+                 this cannot overflow.  */
+              *--s = digit_array[-(v % radix)];
+              v = - (v / radix);
+            }
+
+          /* Store remaining digits, if any.  */
+          for (; 0 < v; v /= radix)
+            *--s = digit_array[v % radix];
+        }
+
+      negdigits = s - e;
+    }
+
+  idx_t alloc;
+  if (ckd_sub (&alloc, +negative, MIN (negdigits, -min)) || SIZE_MAX < alloc)
+    xalloc_die ();
+
+  obstack_blank (obs, alloc);
+  char *p = obstack_next_free (obs) - alloc;
+
+  /* Copy sign, leading zeros, digits, and trailing NUL byte into the
+     newly allocated area.  Do not call memset or memcpy, as this
+     would likely make performance worse as the number of bytes is
+     typically small.  */
+
+  if (negative)
+    *p++ = '-';
+
+  for (ival lz = min + negdigits; 0 < lz; lz--)
+    *p++ = '0';
+
   if (radix == 1)
     {
-      if (value < 0)
-        {
-          obstack_1grow (obs, '-');
-          value = -value;
-        }
-      /* This assumes 2's-complement for correctly handling INT_MIN.  */
-      while (min-- - value > 0)
-        obstack_1grow (obs, '0');
-      while (value-- != 0)
-        obstack_1grow (obs, '1');
-      obstack_1grow (obs, '\0');
-      return;
+      while (negdigits++ < 0)
+        *p++ = '1';
     }
-
-  s = ntoa (value, radix, &e);
-
-  if (*s == '-')
+  else
     {
-      obstack_1grow (obs, '-');
-      s++;
+      do
+        *p++ = *s++;
+      while (s < e);
     }
-  for (min -= e - s; --min >= 0;)
-    obstack_1grow (obs, '0');
 
-  obstack_grow (obs, s, e - s);
+  #if _GL_GNUC_PREREQ (4, 7)
+  # pragma GCC diagnostic pop
+  #endif
 }
 
 static void
-m4_incr (struct obstack *obs, int argc, token_data **argv)
+m4_incr (struct obstack *obs, idx_t argc, token_data **argv)
 {
-  int value;
+  ival value, value1;
 
   if (bad_argc (argv[0], argc, 2, 2))
     return;
 
-  if (!numeric_arg (argv[0], ARG (1), &value))
-    return;
-
-  /* Minimize undefined C behavior on overflow.  This code assumes
-     that the implementation-defined overflow when casting unsigned to
-     signed is a silent twos-complement wrap-around.  */
-  uint32_t v = value;
-  int32_t w = v + 1;
-  shipout_int (obs, w);
+  signed char numeric = numeric_arg (argv[0], ARG (1), &value);
+  if (0 < numeric)
+    {
+      /* If the addition overflows, add 1 to the last digit of the
+         non-overflowed representation.  This works because IVAL_MAX % 10
+         cannot be 9, as IVAL_MAX is one less than a power of 2.  */
+      bool v = ckd_add (&value1, value, 1);
+      shipout_int (obs, v ? value : value1);
+      obstack_next_free (obs)[-1] += v;
+    }
 }
 
 static void
-m4_decr (struct obstack *obs, int argc, token_data **argv)
+m4_decr (struct obstack *obs, idx_t argc, token_data **argv)
 {
-  int value;
+  ival value, value1;
 
   if (bad_argc (argv[0], argc, 2, 2))
     return;
 
-  if (!numeric_arg (argv[0], ARG (1), &value))
-    return;
-
-  /* Minimize undefined C behavior on overflow.  This code assumes
-     that the implementation-defined overflow when casting unsigned to
-     signed is a silent twos-complement wrap-around.  */
-  uint32_t v = value;
-  int32_t w = v - 1;
-  shipout_int (obs, w);
+  signed char numeric = numeric_arg (argv[0], ARG (1), &value);
+  if (0 < numeric)
+    {
+      /* If the subtraction overflows, add 1 to the last digit of the
+         non-overflowed representation.  This works because IVAL_MIN % 10
+         cannot be -9, as IVAL_MIN either is the negative of a power of 2,
+         or (on unusual pre-C23 platforms) is one greater than that.  */
+      bool v = ckd_sub (&value1, value, 1);
+      shipout_int (obs, v ? value : value1);
+      obstack_next_free (obs)[-1] += v;
+    }
 }
 
 /* This section contains the macros "divert", "undivert" and "divnum" for
@@ -1232,15 +1278,21 @@ m4_decr (struct obstack *obs, int argc, token_data **argv)
 `-----------------------------------------------------------------*/
 
 static void
-m4_divert (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_divert (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
-  int i = 0;
+  ival i = 0;
 
   if (bad_argc (argv[0], argc, 1, 2))
     return;
 
-  if (argc >= 2 && !numeric_arg (argv[0], ARG (1), &i))
-    return;
+  if (argc >= 2)
+    {
+      signed char numeric = numeric_arg (argv[0], ARG (1), &i);
+      if (!numeric)
+        return;
+      if (numeric < 0)
+        i = -1;
+    }
 
   make_diversion (i);
 }
@@ -1250,7 +1302,7 @@ m4_divert (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `-----------------------------------------------------*/
 
 static void
-m4_divnum (struct obstack *obs, int argc, token_data **argv)
+m4_divnum (struct obstack *obs, idx_t argc, token_data **argv)
 {
   if (bad_argc (argv[0], argc, 1, 1))
     return;
@@ -1265,9 +1317,9 @@ m4_divnum (struct obstack *obs, int argc, token_data **argv)
 `------------------------------------------------------------------*/
 
 static void
-m4_undivert (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_undivert (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
-  int i, file;
+  idx_t i;
   FILE *fp;
   char *endp;
 
@@ -1277,12 +1329,14 @@ m4_undivert (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
     for (i = 1; i < argc; i++)
       {
         const char *arg = ARG (i);
-        file = strtol (arg, &endp, 10);
+        errno = 0;
+        iival file = strtoiival (arg, &endp, 10);
         if (*endp == '\0' && !c_isspace (*arg))
-          insert_diversion (file);
-        else if (no_gnu_extensions)
-          M4ERROR ((warning_status, 0,
-                    _("non-numeric argument to builtin `%s'"), ARG (0)));
+          {
+            ival ifile;
+            if (errno == 0 && !ckd_add (&ifile, file, 0))
+              insert_diversion (ifile);
+          }
         else
           {
             fp = m4_path_search (arg, false, NULL);
@@ -1291,11 +1345,11 @@ m4_undivert (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
                 insert_file (fp);
                 if (fclose (fp) == EOF)
                   M4ERROR ((warning_status, errno,
-                            _("error undiverting `%s'"), arg));
+                            _("error undiverting %s"), squote (arg)));
               }
             else
               M4ERROR ((warning_status, errno,
-                        _("cannot undivert `%s'"), arg));
+                        _("cannot undivert %s"), squote (arg)));
           }
       }
 }
@@ -1310,7 +1364,7 @@ m4_undivert (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `-----------------------------------------------------------*/
 
 static void
-m4_dnl (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_dnl (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
   if (bad_argc (argv[0], argc, 1, 1))
     return;
@@ -1324,9 +1378,9 @@ m4_dnl (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `--------------------------------------------------------------------*/
 
 static void
-m4_shift (struct obstack *obs, int argc, token_data **argv)
+m4_shift (struct obstack *obs, idx_t argc, token_data **argv)
 {
-  if (bad_argc (argv[0], argc, 2, -1))
+  if (bad_argc (argv[0], argc, 2, IDX_MAX))
     return;
   dump_args (obs, argc - 1, argv + 1, ',', true);
 }
@@ -1336,7 +1390,8 @@ m4_shift (struct obstack *obs, int argc, token_data **argv)
 `--------------------------------------------------------------------------*/
 
 static void
-m4_changequote (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_changequote (struct obstack *obs MAYBE_UNUSED,
+                idx_t argc, token_data **argv)
 {
   if (bad_argc (argv[0], argc, 1, 3))
     return;
@@ -1352,7 +1407,7 @@ m4_changequote (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `-----------------------------------------------------------------*/
 
 static void
-m4_changecom (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_changecom (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
   if (bad_argc (argv[0], argc, 1, 3))
     return;
@@ -1370,7 +1425,7 @@ m4_changecom (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `---------------------------------------------------------------*/
 
 static void
-m4_changeword (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_changeword (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
   if (bad_argc (argv[0], argc, 2, 2))
     return;
@@ -1391,7 +1446,7 @@ m4_changeword (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `---------------------------------------------------------------*/
 
 static void
-include (int argc, token_data **argv, bool silent)
+include (idx_t argc, token_data **argv, bool silent)
 {
   FILE *fp;
   char *name;
@@ -1405,13 +1460,14 @@ include (int argc, token_data **argv, bool silent)
     {
       if (!silent)
         {
-          M4ERROR ((warning_status, errno, _("cannot open `%s'"), arg));
+          M4ERROR ((warning_status, errno, _("cannot open %s"),
+                    sh_quote (arg)));
           retcode = EXIT_FAILURE;
         }
       return;
     }
 
-  push_file (fp, name, true);
+  push_file (fp, name);
   free (name);
 }
 
@@ -1420,7 +1476,7 @@ include (int argc, token_data **argv, bool silent)
 `------------------------------------------------*/
 
 static void
-m4_include (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_include (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
   include (argc, argv, false);
 }
@@ -1430,12 +1486,12 @@ m4_include (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `----------------------------------*/
 
 static void
-m4_sinclude (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_sinclude (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
   include (argc, argv, true);
 }
 
-/* More miscellaneous builtins -- "maketemp", "errprint", "__file__",
+/* More miscellaneous builtins -- "mkstemp", "errprint", "__file__",
    "__line__", and "__program__".  The last three are GNU specific.  */
 
 /*------------------------------------------------------------------.
@@ -1447,28 +1503,33 @@ m4_sinclude (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
    OBS.  Report errors on behalf of ME.  */
 static void
 mkstemp_helper (struct obstack *obs, const char *me, const char *pattern,
-                size_t len)
+                idx_t len)
 {
   int fd;
-  size_t i;
   char *name;
 
-  /* Guarantee that there are six trailing 'X' characters, even if the
-     user forgot to supply them.  Output must be quoted if
-     successful.  */
   obstack_grow (obs, lquote.string, lquote.length);
   obstack_grow (obs, pattern, len);
-  for (i = 0; len > 0 && i < 6; i++)
-    if (pattern[len - i - 1] != 'X')
-      break;
-  obstack_grow0 (obs, "XXXXXX", 6 - i);
+
+  if (!no_gnu_extensions)
+    {
+      /* Guarantee that there are six trailing 'X' characters, even if the
+         user forgot to supply them.  */
+      int i;
+      for (i = 0; i < MIN (6, len) && pattern[len - 1 - i] == 'X'; i++)
+        continue;
+      static char const _GL_ATTRIBUTE_NONSTRING XXXXXX[6] = "XXXXXX";
+      obstack_grow0 (obs, XXXXXX, 6 - i);
+    }
+
   name = (char *) obstack_base (obs) + lquote.length;
 
   errno = 0;
   fd = mkstemp (name);
   if (fd < 0)
     {
-      M4ERROR ((0, errno, _("%s: cannot create tempfile `%s'"), me, pattern));
+      M4ERROR ((0, errno, _("%s cannot create tempfile %s"),
+                sh_quote_n (0, me), sh_quote_n (1, pattern)));
       obstack_free (obs, obstack_finish (obs));
     }
   else
@@ -1481,51 +1542,7 @@ mkstemp_helper (struct obstack *obs, const char *me, const char *pattern,
 }
 
 static void
-m4_maketemp (struct obstack *obs, int argc, token_data **argv)
-{
-  if (bad_argc (argv[0], argc, 2, 2))
-    return;
-  if (no_gnu_extensions)
-    {
-      /* POSIX states "any trailing 'X' characters [are] replaced with
-         the current process ID as a string", without referencing the
-         file system.  Horribly insecure, but we have to do it when we
-         are in traditional mode.
-
-         For reference, Solaris m4 does:
-         maketemp() -> `'
-         maketemp(X) -> `X'
-         maketemp(XX) -> `Xn', where n is last digit of pid
-         maketemp(XXXXXXXX) -> `X00nnnnn', where nnnnn is 16-bit pid
-       */
-      const char *str = ARG (1);
-      int len = ARGLEN (1);
-      int i;
-      int len2;
-      const char *e;
-
-      M4ERROR ((warning_status, 0, _("recommend using mkstemp instead")));
-      for (i = len; i > 1; i--)
-        if (str[i - 1] != 'X')
-          break;
-      obstack_grow (obs, str, i);
-      str = ntoa ((int32_t) getpid (), 10, &e);
-      len2 = e - str;
-      if (len2 > len - i)
-        obstack_grow0 (obs, str + len2 - (len - i), len - i);
-      else
-        {
-          while (i++ < len - len2)
-            obstack_1grow (obs, '0');
-          obstack_grow0 (obs, str, len2);
-        }
-    }
-  else
-    mkstemp_helper (obs, ARG (0), ARG (1), ARGLEN (1));
-}
-
-static void
-m4_mkstemp (struct obstack *obs, int argc, token_data **argv)
+m4_mkstemp (struct obstack *obs, idx_t argc, token_data **argv)
 {
   if (bad_argc (argv[0], argc, 2, 2))
     return;
@@ -1537,9 +1554,9 @@ m4_mkstemp (struct obstack *obs, int argc, token_data **argv)
 `----------------------------------------*/
 
 static void
-m4_errprint (struct obstack *obs, int argc, token_data **argv)
+m4_errprint (struct obstack *obs, idx_t argc, token_data **argv)
 {
-  if (bad_argc (argv[0], argc, 2, -1))
+  if (bad_argc (argv[0], argc, 2, IDX_MAX))
     return;
   dump_args (obs, argc, argv, ' ', false);
   obstack_1grow (obs, '\0');
@@ -1549,7 +1566,7 @@ m4_errprint (struct obstack *obs, int argc, token_data **argv)
 }
 
 static void
-m4___file__ (struct obstack *obs, int argc, token_data **argv)
+m4___file__ (struct obstack *obs, idx_t argc, token_data **argv)
 {
   if (bad_argc (argv[0], argc, 1, 1))
     return;
@@ -1559,7 +1576,7 @@ m4___file__ (struct obstack *obs, int argc, token_data **argv)
 }
 
 static void
-m4___line__ (struct obstack *obs, int argc, token_data **argv)
+m4___line__ (struct obstack *obs, idx_t argc, token_data **argv)
 {
   if (bad_argc (argv[0], argc, 1, 1))
     return;
@@ -1567,7 +1584,7 @@ m4___line__ (struct obstack *obs, int argc, token_data **argv)
 }
 
 static void
-m4___program__ (struct obstack *obs, int argc, token_data **argv)
+m4___program__ (struct obstack *obs, idx_t argc, token_data **argv)
 {
   if (bad_argc (argv[0], argc, 1, 1))
     return;
@@ -1586,20 +1603,24 @@ m4___program__ (struct obstack *obs, int argc, token_data **argv)
 `----------------------------------------------------------*/
 
 static void
-m4_m4exit (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_m4exit (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
-  int exit_code = EXIT_SUCCESS;
+  int exit_code;
 
   /* Warn on bad arguments, but still exit.  */
   bad_argc (argv[0], argc, 1, 2);
-  if (argc >= 2 && !numeric_arg (argv[0], ARG (1), &exit_code))
+  ival iexit_code = EXIT_SUCCESS;
+  if (argc >= 2 && !numeric_arg (argv[0], ARG (1), &iexit_code))
     exit_code = EXIT_FAILURE;
-  if (exit_code < 0 || exit_code > 255)
+  else if (0 <= iexit_code && iexit_code < 256)
+    exit_code = iexit_code;
+  else
     {
       M4ERROR ((warning_status, 0,
-                _("exit status out of range: `%d'"), exit_code));
+                _("exit status out of range: %s"), ARG (1)));
       exit_code = EXIT_FAILURE;
     }
+
   /* Change debug stream back to stderr, to force flushing debug stream and
      detect any errors it might have encountered.  */
   debug_set_output (NULL);
@@ -1619,9 +1640,9 @@ m4_m4exit (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `------------------------------------------------------------------*/
 
 static void
-m4_m4wrap (struct obstack *obs, int argc, token_data **argv)
+m4_m4wrap (struct obstack *obs, idx_t argc, token_data **argv)
 {
-  if (bad_argc (argv[0], argc, 2, -1))
+  if (bad_argc (argv[0], argc, 2, IDX_MAX))
     return;
   if (no_gnu_extensions)
     obstack_grow (obs, ARG (1), ARGLEN (1));
@@ -1651,10 +1672,10 @@ set_trace (symbol *sym, void *data)
 }
 
 static void
-m4_traceon (struct obstack *obs, int argc, token_data **argv)
+m4_traceon (struct obstack *obs, idx_t argc, token_data **argv)
 {
   symbol *s;
-  int i;
+  idx_t i;
 
   if (argc == 1)
     hack_all_symbols (set_trace, obs);
@@ -1673,10 +1694,10 @@ m4_traceon (struct obstack *obs, int argc, token_data **argv)
 `------------------------------------------------------------------------*/
 
 static void
-m4_traceoff (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_traceoff (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
   symbol *s;
-  int i;
+  idx_t i;
 
   if (argc == 1)
     hack_all_symbols (set_trace, NULL);
@@ -1697,10 +1718,10 @@ m4_traceoff (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `------------------------------------------------------------------*/
 
 static void
-m4_debugmode (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_debugmode (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
   int new_debug_level;
-  int change_flag;
+  char change_flag;
   const char *str = ARG (1);
 
   if (bad_argc (argv[0], argc, 1, 2))
@@ -1723,7 +1744,7 @@ m4_debugmode (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 
       if (new_debug_level < 0)
         M4ERROR ((warning_status, 0,
-                  _("Debugmode: bad debug flags: `%s'"), str));
+                  _("Debugmode: bad debug flags: %s"), squote (str)));
       else
         {
           switch (change_flag)
@@ -1755,7 +1776,7 @@ m4_debugmode (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `-------------------------------------------------------------------------*/
 
 static void
-m4_debugfile (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_debugfile (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
   if (bad_argc (argv[0], argc, 1, 2))
     return;
@@ -1764,7 +1785,7 @@ m4_debugfile (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
     debug_set_output (NULL);
   else if (!debug_set_output (ARG (1)))
     M4ERROR ((warning_status, errno,
-              _("cannot set debug file `%s'"), ARG (1)));
+              _("cannot set debug file %s"), sh_quote (ARG (1))));
 }
 
 /* This section contains text processing macros: "len", "index",
@@ -1776,7 +1797,7 @@ m4_debugfile (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
 `---------------------------------------------*/
 
 static void
-m4_len (struct obstack *obs, int argc, token_data **argv)
+m4_len (struct obstack *obs, idx_t argc, token_data **argv)
 {
   if (bad_argc (argv[0], argc, 2, 2))
     return;
@@ -1789,11 +1810,11 @@ m4_len (struct obstack *obs, int argc, token_data **argv)
 `-------------------------------------------------------------------*/
 
 static void
-m4_index (struct obstack *obs, int argc, token_data **argv)
+m4_index (struct obstack *obs, idx_t argc, token_data **argv)
 {
   const char *haystack;
   const char *result;
-  int retval;
+  ptrdiff_t retval;
 
   if (bad_argc (argv[0], argc, 3, 3))
     {
@@ -1819,10 +1840,10 @@ m4_index (struct obstack *obs, int argc, token_data **argv)
 `-----------------------------------------------------------------*/
 
 static void
-m4_substr (struct obstack *obs, int argc, token_data **argv)
+m4_substr (struct obstack *obs, idx_t argc, token_data **argv)
 {
-  int start = 0;
-  int length, avail;
+  ival start = 0, length;
+  idx_t avail;
 
   if (bad_argc (argv[0], argc, 3, 4))
     {
@@ -1842,9 +1863,7 @@ m4_substr (struct obstack *obs, int argc, token_data **argv)
   if (start < 0 || length <= 0 || start >= avail)
     return;
 
-  if (start + length > avail)
-    length = avail - start;
-  obstack_grow (obs, ARG (1) + start, length);
+  obstack_grow (obs, ARG (1) + start, MIN (length, avail - start));
 }
 
 /*------------------------------------------------------------------.
@@ -1902,14 +1921,13 @@ expand_ranges (const char *s, struct obstack *obs)
 `-----------------------------------------------------------------*/
 
 static void
-m4_translit (struct obstack *obs, int argc, token_data **argv)
+m4_translit (struct obstack *obs, idx_t argc, token_data **argv)
 {
   const char *data = ARG (1);
-  int datalen = ARGLEN (1);
+  idx_t datalen = ARGLEN (1);
   const char *from = ARG (2);
   const char *to;
   char map[UCHAR_MAX + 1];
-  char found[UCHAR_MAX + 1];
   unsigned char ch;
 
   if (bad_argc (argv[0], argc, 3, 4) || !*data || !*from)
@@ -1933,7 +1951,7 @@ m4_translit (struct obstack *obs, int argc, token_data **argv)
   if (!from[1] || !from[2])
     {
       const char *p;
-      size_t len = datalen;
+      idx_t len = datalen;
       while ((p = (char *) memchr2 (data, from[0], from[1], len)))
         {
           obstack_grow (obs, data, p - data);
@@ -1962,27 +1980,18 @@ m4_translit (struct obstack *obs, int argc, token_data **argv)
      from-to mapping in one pass of from, then use that map in one
      pass of data, for linear behavior.  Traditional behavior is that
      only the first instance of a character in from is consulted,
-     hence the found map.  */
-  memset (map, 0, sizeof map);
-  memset (found, 0, sizeof found);
-  for (; (ch = *from) != '\0'; from++)
-    {
-      if (!found[ch])
-        {
-          found[ch] = 1;
-          map[ch] = *to;
-        }
-      if (*to != '\0')
-        to++;
-    }
+     hence the traversal backward from MIN (fromlen, tolen).  */
+  for (idx_t i = 0; i < sizeof map; i++)
+    map[i] = i;
+  idx_t fromlen = strlen (from), tolen = strlen (to);
+  for (idx_t i = tolen; i < fromlen; i++)
+    map[to_uchar (from[i])] = '\0';
+  for (ptrdiff_t i = MIN (fromlen, tolen); 0 <= --i; )
+    map[to_uchar (from[i])] = to[i];
 
   for (data = ARG (1); (ch = *data) != '\0'; data++)
-    {
-      if (!found[ch])
-        obstack_1grow (obs, ch);
-      else if (map[ch])
-        obstack_1grow (obs, map[ch]);
-    }
+    if (map[ch])
+      obstack_1grow (obs, map[ch]);
 }
 
 /*-------------------------------------------------------------------.
@@ -1991,9 +2000,9 @@ m4_translit (struct obstack *obs, int argc, token_data **argv)
 `-------------------------------------------------------------------*/
 
 static void
-m4_format (struct obstack *obs, int argc, token_data **argv)
+m4_format (struct obstack *obs, idx_t argc, token_data **argv)
 {
-  if (bad_argc (argv[0], argc, 2, -1))
+  if (bad_argc (argv[0], argc, 2, IDX_MAX))
     return;
   expand_format (obs, argc - 1, argv + 1);
 }
@@ -2007,14 +2016,11 @@ m4_format (struct obstack *obs, int argc, token_data **argv)
 | Nth parenthesized sub-expression, taken from REGS[N].             |
 `------------------------------------------------------------------*/
 
-static int substitute_warned = 0;
-
 static void
 substitute (struct obstack *obs, const char *victim, const char *repl,
             struct re_registers *regs)
 {
   int ch;
-  __re_size_t ind;
   while (1)
     {
       const char *backslash = strchr (repl, '\\');
@@ -2029,12 +2035,15 @@ substitute (struct obstack *obs, const char *victim, const char *repl,
       switch (ch)
         {
         case '0':
-          if (!substitute_warned)
-            {
-              M4ERROR ((warning_status, 0, _("\
+          {
+            static bool substitute_warned;
+            if (!substitute_warned)
+              {
+                substitute_warned = true;
+                M4ERROR ((warning_status, 0, _("\
 Warning: \\0 will disappear, use \\& instead in replacements")));
-              substitute_warned = 1;
-            }
+              }
+          }
           FALLTHROUGH;
         case '&':
           obstack_grow (obs, victim + regs->start[0],
@@ -2051,8 +2060,8 @@ Warning: \\0 will disappear, use \\& instead in replacements")));
         case '7':
         case '8':
         case '9':
-          ind = ch -= '0';
-          if (regs->num_regs - 1 <= ind)
+          ch -= '0';
+          if (regs->num_regs <= ch + 1)
             M4ERROR ((warning_status, 0,
                       _("Warning: sub-expression %d not present"), ch));
           else if (regs->end[ch] > 0)
@@ -2100,7 +2109,7 @@ init_pattern_buffer (struct re_pattern_buffer *buf, struct re_registers *regs)
 `------------------------------------------------------------------*/
 
 static void
-m4_regexp (struct obstack *obs, int argc, token_data **argv)
+m4_regexp (struct obstack *obs, idx_t argc, token_data **argv)
 {
   const char *victim;           /* first argument */
   const char *regexp;           /* regular expression */
@@ -2109,8 +2118,8 @@ m4_regexp (struct obstack *obs, int argc, token_data **argv)
   struct re_pattern_buffer buf; /* compiled regular expression */
   struct re_registers regs;     /* for subexpression matches */
   const char *msg;              /* error message from re_compile_pattern */
-  int startpos;                 /* start position of match */
-  int length;                   /* length of first argument */
+  ptrdiff_t startpos;           /* start position of match */
+  idx_t length;                 /* length of first argument */
 
   if (bad_argc (argv[0], argc, 3, 4))
     {
@@ -2129,7 +2138,7 @@ m4_regexp (struct obstack *obs, int argc, token_data **argv)
   if (msg != NULL)
     {
       M4ERROR ((warning_status, 0,
-                _("bad regular expression: `%s': %s"), regexp, msg));
+                _("bad regular expression: %s: %s"), squote (regexp), msg));
       free_pattern_buffer (&buf, &regs);
       return;
     }
@@ -2141,7 +2150,7 @@ m4_regexp (struct obstack *obs, int argc, token_data **argv)
 
   if (startpos == -2)
     M4ERROR ((warning_status, 0,
-              _("error matching regular expression `%s'"), regexp));
+              _("error matching regular expression %s"), squote (regexp)));
   else if (argc == 3)
     shipout_int (obs, startpos);
   else if (startpos >= 0)
@@ -2161,7 +2170,7 @@ m4_regexp (struct obstack *obs, int argc, token_data **argv)
 `--------------------------------------------------------------------------*/
 
 static void
-m4_patsubst (struct obstack *obs, int argc, token_data **argv)
+m4_patsubst (struct obstack *obs, idx_t argc, token_data **argv)
 {
   const char *victim;           /* first argument */
   const char *regexp;           /* regular expression */
@@ -2169,9 +2178,9 @@ m4_patsubst (struct obstack *obs, int argc, token_data **argv)
   struct re_pattern_buffer buf; /* compiled regular expression */
   struct re_registers regs;     /* for subexpression matches */
   const char *msg;              /* error message from re_compile_pattern */
-  int matchpos;                 /* start position of match */
-  int offset;                   /* current match offset */
-  int length;                   /* length of first argument */
+  ptrdiff_t matchpos;           /* start position of match */
+  idx_t offset;                 /* current match offset */
+  idx_t length;                 /* length of first argument */
 
   if (bad_argc (argv[0], argc, 3, 4))
     {
@@ -2189,7 +2198,7 @@ m4_patsubst (struct obstack *obs, int argc, token_data **argv)
   if (msg != NULL)
     {
       M4ERROR ((warning_status, 0,
-                _("bad regular expression `%s': %s"), regexp, msg));
+                _("bad regular expression %s: %s"), squote (regexp), msg));
       free (buf.buffer);
       return;
     }
@@ -2211,7 +2220,8 @@ m4_patsubst (struct obstack *obs, int argc, token_data **argv)
 
           if (matchpos == -2)
             M4ERROR ((warning_status, 0,
-                      _("error matching regular expression `%s'"), regexp));
+                      _("error matching regular expression %s"),
+                      squote (regexp)));
           else if (offset < length)
             obstack_grow (obs, victim + offset, length - offset);
           break;
@@ -2255,10 +2265,11 @@ m4_patsubst (struct obstack *obs, int argc, token_data **argv)
 `--------------------------------------------------------------------*/
 
 void
-m4_placeholder (struct obstack *obs MAYBE_UNUSED, int argc, token_data **argv)
+m4_placeholder (struct obstack *obs MAYBE_UNUSED, idx_t argc, token_data **argv)
 {
-  M4ERROR ((warning_status, 0, _("\
-builtin `%s' requested by frozen file is not supported"), ARG (0)));
+  M4ERROR ((warning_status, 0,
+            _("builtin %s requested by frozen file is not supported"),
+            squote (ARG (0))));
 }
 
 /*-------------------------------------------------------------------.
@@ -2271,11 +2282,11 @@ builtin `%s' requested by frozen file is not supported"), ARG (0)));
 
 void
 expand_user_macro (struct obstack *obs, symbol *sym,
-                   int argc, token_data **argv)
+                   idx_t argc, token_data **argv)
 {
   const char *text = SYMBOL_TEXT (sym);
   const char *end = text + SYMBOL_TEXT_LEN (sym);
-  int i;
+  idx_t i;
   while (1)
     {
       const char *dollar = strchr (text, '$');
@@ -2298,14 +2309,17 @@ expand_user_macro (struct obstack *obs, symbol *sym,
         case '7':
         case '8':
         case '9':
-          if (no_gnu_extensions)
+          i = *text++ - '0';
+          if (!no_gnu_extensions)
             {
-              i = *text++ - '0';
-            }
-          else
-            {
-              for (i = 0; c_isdigit (*text); text++)
-                i = i * 10 + (*text - '0');
+              bool v = false;
+              for (; c_isdigit (*text); text++)
+                {
+                  v |= ckd_mul (&i, i, 10);
+                  v |= ckd_add (&i, i, *text - '0');
+                }
+              if (v)
+                break;
             }
           obstack_grow (obs, ARG (i), ARGLEN (i));
           break;

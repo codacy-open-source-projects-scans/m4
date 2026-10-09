@@ -24,6 +24,8 @@
 #include <stdarg.h>
 #include <sys/stat.h>
 
+#include "inttostr.h"
+
 /* File for debugging output.  */
 FILE *debug = NULL;
 
@@ -33,7 +35,7 @@ static struct obstack trace;
 static void debug_set_file (FILE *);
 
 /*----------------------------------.
-| Initialise the debugging module.  |
+| Initialize the debugging module.  |
 `----------------------------------*/
 
 void
@@ -229,9 +231,9 @@ debug_message_prefix (void)
   if (current_line)
     {
       if (debug_level & DEBUG_TRACE_FILE)
-        xfprintf (debug, "%s:", current_file);
+        xfprintf (debug, "%s:", cquote (current_file));
       if (debug_level & DEBUG_TRACE_LINE)
-        xfprintf (debug, "%d:", current_line);
+        xfprintf (debug, "%"PRIdIVAL":", current_line);
     }
   putc (' ', debug);
 }
@@ -254,22 +256,24 @@ trace_format (const char *fmt, ...)
   va_list args;
   char ch;
 
-  int d;
+  intmax_t d;
   const char *s;
-  int slen;
-  int maxlen;
+  idx_t slen;
+  idx_t maxlen;
 
   va_start (args, fmt);
 
   while (true)
     {
+      char sbuf[INT_BUFSIZE_BOUND (intmax_t)];
+
       while ((ch = *fmt++) != '\0' && ch != '%')
         obstack_1grow (&trace, ch);
 
       if (ch == '\0')
         break;
 
-      maxlen = 0;
+      maxlen = IDX_MAX;
       switch (*fmt++)
         {
         case 'S':
@@ -288,8 +292,8 @@ trace_format (const char *fmt, ...)
           break;
 
         case 'd':
-          d = va_arg (args, int);
-          s = ntoa (d, 10, NULL);
+          d = va_arg (args, intmax_t);
+          s = imaxtostr (d, sbuf);
           break;
 
         default:
@@ -298,7 +302,7 @@ trace_format (const char *fmt, ...)
         }
 
       slen = strlen (s);
-      if (maxlen == 0 || maxlen > slen)
+      if (slen <= maxlen)
         obstack_grow (&trace, s, slen);
       else
         {
@@ -315,15 +319,15 @@ trace_format (const char *fmt, ...)
 `------------------------------------------------------------------*/
 
 static void
-trace_header (int id)
+trace_header (intmax_t id)
 {
   trace_format ("m4trace:");
   if (current_line)
     {
       if (debug_level & DEBUG_TRACE_FILE)
-        trace_format ("%s:", current_file);
+        trace_format ("%s:", cquote (current_file));
       if (debug_level & DEBUG_TRACE_LINE)
-        trace_format ("%d:", current_line);
+        trace_format ("%d:", (intmax_t) {current_line});
     }
   trace_format (" -%d- ", expansion_level);
   if (debug_level & DEBUG_TRACE_CALLID)
@@ -351,7 +355,7 @@ trace_flush (void)
 `--------------------------------------------------------------*/
 
 void
-trace_prepre (const char *name, int id)
+trace_prepre (const char *name, intmax_t id)
 {
   trace_header (id);
   trace_format ("%s ...", name);
@@ -364,9 +368,9 @@ trace_prepre (const char *name, int id)
 `--------------------------------------------------------------*/
 
 void
-trace_pre (const char *name, int id, int argc, token_data **argv)
+trace_pre (const char *name, intmax_t id, idx_t argc, token_data **argv)
 {
-  int i;
+  idx_t i;
   const builtin *bp;
 
   trace_header (id);
@@ -422,7 +426,7 @@ INTERNAL ERROR: builtin not found in builtin table! (trace_pre ())"));
 `-------------------------------------------------------------------*/
 
 void
-trace_post (const char *name, int id, int argc, const char *expanded)
+trace_post (const char *name, intmax_t id, idx_t argc, const char *expanded)
 {
   if (debug_level & DEBUG_TRACE_CALL)
     {

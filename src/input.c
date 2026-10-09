@@ -28,7 +28,7 @@
 /* Unread input can be either files, that should be read (eg. included
    files), strings, which should be rescanned (eg. macro expansion text),
    or quoted macro definitions (as returned by the builtin "defn").
-   Unread input are organised in a stack, implemented with an obstack.
+   Unread input is organized in a stack, implemented with an obstack.
    Each input source is described by a "struct input_block".  The obstack
    is "current_input".  The top of the input stack is "isp".
 
@@ -45,7 +45,7 @@
    Pushing new input on the input stack is done by push_file (),
    push_string (), push_wrapup () (for wrapup text), and push_macro ()
    (for macro definitions).  Because macro expansion needs direct access
-   to the current input obstack (for optimisation), push_string () are
+   to the current input obstack (for optimization), push_string () is
    split in two functions, push_string_init (), which returns a pointer
    to the current input stack, and push_string_finish (), which return a
    pointer to the final text.  The input_block *next is used to manage
@@ -78,7 +78,7 @@ struct input_block
   struct input_block *prev;     /* previous input_block on the input stack */
   input_type type;              /* see enum values */
   const char *file;             /* file where this input is from */
-  int line;                     /* line where this input is from */
+  ival line;                    /* line where this input is from */
   union
   {
     struct
@@ -107,7 +107,7 @@ typedef struct input_block input_block;
 const char *current_file;
 
 /* Current input line number.  */
-int current_line;
+ival current_line;
 
 /* Obstack for storing individual tokens.  */
 static struct obstack token_stack;
@@ -156,11 +156,11 @@ STRING ecomm;
 
 static char word_start[256];
 static struct re_pattern_buffer word_regexp;
-static int default_word_regexp;
+static bool default_word_regexp;
 static struct re_registers regs;
 
 #else /* ! ENABLE_CHANGEWORD */
-# define default_word_regexp 1
+# define default_word_regexp true
 #endif /* ! ENABLE_CHANGEWORD */
 
 #ifdef DEBUG_INPUT
@@ -168,6 +168,8 @@ static const char *token_type_string (token_type);
 #endif
 
 static void pop_input (void);
+
+static char const stdin_name[] = N_("stdin");
 
 
 
@@ -175,12 +177,12 @@ static void pop_input (void);
 | push_file () pushes an input file on the input stack, saving the   |
 | current file name and line number.  If next is non-NULL, this push |
 | invalidates a call to push_string_init (), whose storage is        |
-| consequently released.  If CLOSE_WHEN_DONE, then close FP after    |
-| EOF is detected.                                                   |
+| consequently released.  If !TITLE it is standard input; otherwise, |
+| close FP after EOF is detected.                                    |
 `-------------------------------------------------------------------*/
 
 void
-push_file (FILE *fp, const char *title, bool close_when_done)
+push_file (FILE *fp, const char *title)
 {
   input_block *i;
 
@@ -191,18 +193,27 @@ push_file (FILE *fp, const char *title, bool close_when_done)
     }
 
   if (debug_level & DEBUG_TRACE_INPUT)
-    DEBUG_MESSAGE1 ("input read from %s", title);
+    DEBUG_MESSAGE1 ("input read from %s",
+                    title ? sh_quote (title) : _(stdin_name));
 
   i = (input_block *) obstack_alloc (current_input,
                                      sizeof (struct input_block));
   i->type = INPUT_FILE;
-  i->file = (char *) obstack_copy0 (&file_names, title, strlen (title));
+  i->file = (title
+             ? obstack_copy0 (&file_names, title, strlen (title))
+             : stdin_name);
   i->line = 1;
   input_change = true;
 
   i->u.u_f.fp = fp;
   i->u.u_f.end = false;
-  i->u.u_f.close = close_when_done;
+
+  /* If stdin is a terminal, we want to allow 'm4 - file -' to read
+     input from stdin twice, like GNU cat.  Besides, there is no point
+     closing stdin before wrapped text, to minimize bugs in syscmd
+     called from wrapped text.  */
+  i->u.u_f.close = !!title;
+
   i->u.u_f.advance = start_of_input_line;
   output_current_line = -1;
 
@@ -285,7 +296,7 @@ push_string_finish (void)
 
   if (obstack_object_size (current_input) > 0)
     {
-      size_t len = obstack_object_size (current_input);
+      idx_t len = obstack_object_size (current_input);
       obstack_1grow (current_input, '\0');
       next->u.u_s.string = (char *) obstack_finish (current_input);
       next->u.u_s.end = next->u.u_s.string + len;
@@ -312,7 +323,7 @@ push_string_finish (void)
 void
 push_wrapup (const char *s)
 {
-  size_t len = strlen (s);
+  idx_t len = strlen (s);
   input_block *i;
   i = (input_block *) obstack_alloc (wrapup_stack,
                                      sizeof (struct input_block));
@@ -348,8 +359,11 @@ pop_input (void)
       if (debug_level & DEBUG_TRACE_INPUT)
         {
           if (tmp)
-            DEBUG_MESSAGE2 ("input reverted to %s, line %d",
-                            tmp->file, tmp->line);
+            DEBUG_MESSAGE2 ("input reverted to %s, line %"PRIdIVAL,
+                            (tmp->file == stdin_name
+                             ? _(stdin_name)
+                             : sh_quote (tmp->file)),
+                            tmp->line);
           else
             DEBUG_MESSAGE ("input exhausted");
         }
@@ -436,8 +450,7 @@ init_macro_token (token_data *td)
       abort ();
     }
 
-  TOKEN_DATA_TYPE (td) = TOKEN_FUNC;
-  TOKEN_DATA_FUNC (td) = isp->u.func;
+  set_token_data_func (td, isp->u.func);
 }
 
 
@@ -579,7 +592,7 @@ skip_line (void)
 {
   int ch;
   const char *file = current_file;
-  int line = current_line;
+  ival line = current_line;
 
   while ((ch = next_char ()) != CHAR_EOF && ch != '\n')
     ;
@@ -609,7 +622,7 @@ skip_line (void)
 static bool
 match_input (const char *s, bool consume)
 {
-  int n;                        /* number of characters matched */
+  idx_t n;                      /* number of characters matched */
   int ch;                       /* input character */
   const char *t;
   bool result = false;
@@ -778,7 +791,7 @@ set_word_regexp (const char *regexp)
   const char *msg;
   struct re_pattern_buffer new_word_regexp;
 
-  if (!*regexp || STREQ (regexp, DEFAULT_WORD_REGEXP))
+  if (!*regexp || streq (regexp, DEFAULT_WORD_REGEXP))
     {
       default_word_regexp = true;
       return;
@@ -792,7 +805,7 @@ set_word_regexp (const char *regexp)
   if (msg != NULL)
     {
       M4ERROR ((warning_status, 0,
-                _("bad regular expression `%s': %s"), regexp, msg));
+                _("bad regular expression %s: %s"), squote (regexp), msg));
       return;
     }
 
@@ -801,7 +814,7 @@ set_word_regexp (const char *regexp)
      The fastmap can be reused between compilations, and will be freed
      by the final regfree.  */
   if (!word_regexp.fastmap)
-    word_regexp.fastmap = xcharalloc (UCHAR_MAX + 1);
+    word_regexp.fastmap = ximalloc (UCHAR_MAX + 1);
   msg = re_compile_pattern (regexp, strlen (regexp), &word_regexp);
   assert (!msg);
   re_set_registers (&word_regexp, &regs, regs.num_regs, regs.start, regs.end);
@@ -844,17 +857,17 @@ set_word_regexp (const char *regexp)
 `--------------------------------------------------------------------*/
 
 token_type
-next_token (token_data *td, int *line)
+next_token (token_data *td, ival *line)
 {
   int ch;
-  int quote_level;
+  idx_t quote_level;
   token_type type;
 #ifdef ENABLE_CHANGEWORD
-  int startpos;
+  ptrdiff_t startpos;
   char *orig_text = NULL;
 #endif
   const char *file;
-  int dummy;
+  ival dummy;
 
   obstack_free (&token_stack, token_bottom);
   if (!line)
@@ -984,7 +997,7 @@ next_token (token_data *td, int *line)
                                 ? isp->u.u_s.string : NULL);
           if (buffer && *buffer)
             {
-              size_t len = isp->u.u_s.end - buffer;
+              idx_t len = isp->u.u_s.end - buffer;
               const char *p = buffer;
               do
                 {
@@ -1041,13 +1054,12 @@ next_token (token_data *td, int *line)
 
   obstack_1grow (&token_stack, '\0');
 
-  TOKEN_DATA_TYPE (td) = TOKEN_TEXT;
-  TOKEN_DATA_LEN (td) = obstack_object_size (&token_stack) - 1;
-  TOKEN_DATA_TEXT (td) = (char *) obstack_finish (&token_stack);
+  idx_t len = obstack_object_size (&token_stack) - 1;
+  set_token_data_text (td, obstack_finish (&token_stack), len);
 #ifdef ENABLE_CHANGEWORD
   if (orig_text == NULL)
     orig_text = TOKEN_DATA_TEXT (td);
-  TOKEN_DATA_ORIG_TEXT (td) = orig_text;
+  set_token_data_orig_text (td, orig_text);
 #endif
 #ifdef DEBUG_INPUT
   xfprintf (stderr, "next_token -> %s (%s)\n",

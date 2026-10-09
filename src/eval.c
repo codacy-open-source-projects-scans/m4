@@ -26,6 +26,8 @@
 
 #include "m4.h"
 
+#include <stdckdint.h>
+
 /* Evaluates token types.  */
 
 #define MIN_PREC 1
@@ -42,6 +44,7 @@ typedef enum eval_token
   LNOT,
   NOT,
   NUMBER,
+  BIGNUM,
   LOR = 10,
   LAND = 20,
   OR = 30,
@@ -73,6 +76,7 @@ typedef enum eval_error
   DIVIDE_ZERO,
   MODULO_ZERO,
   NEGATIVE_EXPONENT,
+  INTEGER_OVERFLOW,
   /* All errors prior to SYNTAX_ERROR can be ignored in a dead
      branch of && and ||.  All errors after are just more details
      about a syntax error.  */
@@ -85,8 +89,8 @@ typedef enum eval_error
 }
 eval_error;
 
-static eval_error primary (int32_t *);
-static eval_error parse_expr (int32_t *, eval_error, unsigned);
+static eval_error primary (ival *);
+static eval_error parse_expr (ival *, eval_error, int);
 
 /*--------------------.
 | Lexical functions.  |
@@ -115,7 +119,7 @@ eval_undo (void)
 /* VAL is numerical value, if any.  */
 
 static eval_token
-eval_lex (int32_t *val)
+eval_lex (ival *val)
 {
   while (c_isspace (*eval_text))
     eval_text++;
@@ -127,12 +131,10 @@ eval_lex (int32_t *val)
 
   if (c_isdigit (*eval_text))
     {
-      unsigned int base, digit;
-      /* The documentation says that "overflow silently results in wraparound".
-         Therefore use an unsigned integer type to avoid undefined behaviour
-         when parsing '-2147483648'.  */
-      uint32_t value;
+      int base, digit;
+      ival value;
       bool seen_digit = false;
+      bool v = false;
 
       if (*eval_text == '0')
         {
@@ -185,7 +187,7 @@ eval_lex (int32_t *val)
           if (base == 1)
             {
               if (digit == 1)
-                value++;
+                v |= ckd_add (&value, value, 1);
               else if (digit == 0 && value == 0)
                 continue;
               else
@@ -194,11 +196,16 @@ eval_lex (int32_t *val)
           else if (digit >= base)
             return BADNUM;
           else
-            value = value * base + digit;
+            {
+              v |= ckd_mul (&value, value, base);
+              v |= ckd_add (&value, value, digit);
+            }
         }
-      *val = value;
+      *val = toival (value);
       if (!seen_digit)
         return BADNUM;
+      if (!IVAL_32_BIT && v)
+        return BIGNUM;
       return NUMBER;
     }
 
@@ -308,16 +315,18 @@ eval_lex (int32_t *val)
 
 /* Parse `(expr)', unary operators, and numbers.  */
 static eval_error
-primary (int32_t *v1)
+primary (ival *v1)
 {
   eval_error er;
-  int32_t v2;
+  ival v2;
 
   switch (eval_lex (v1))
     {
       /* Number */
     case NUMBER:
       return NO_ERROR;
+    case BIGNUM:
+      return INTEGER_OVERFLOW;
 
       /* Parenthesis */
     case LEFTP:
@@ -340,15 +349,13 @@ primary (int32_t *v1)
         }
 
       /* Unary operators */
-      /* Minimize undefined C behavior on overflow.  This code assumes
-         that the implementation-defined overflow when casting
-         unsigned to signed is a silent twos-complement
-         wrap-around.  */
     case PLUS:
       return primary (v1);
     case MINUS:
       er = primary (v1);
-      *v1 = (int32_t) -(uint32_t) *v1;
+      if (ckd_sub (v1, 0, *v1) && !IVAL_32_BIT)
+        er = INTEGER_OVERFLOW;
+      *v1 = toival (*v1);
       return er;
     case NOT:
       er = primary (v1);
@@ -356,7 +363,7 @@ primary (int32_t *v1)
       return er;
     case LNOT:
       er = primary (v1);
-      *v1 = *v1 == 0 ? 1 : 0;
+      *v1 = *v1 == 0;
       return er;
 
       /* Anything else */
@@ -373,16 +380,13 @@ primary (int32_t *v1)
 
 /* Parse binary operators with at least MIN_PREC precedence.  */
 static eval_error
-parse_expr (int32_t *v1, eval_error er, unsigned min_prec)
+parse_expr (ival *v1, eval_error er, int min_prec)
 {
   eval_token et;
   eval_token et2;
   eval_error er2;
-  int32_t v2;
-  int32_t v3;
-  uint32_t u1;
-  uint32_t u2;
-  uint32_t u3;
+  ival v2;
+  ival v3;
 
   if (er >= SYNTAX_ERROR)
     return er;
@@ -404,39 +408,51 @@ parse_expr (int32_t *v1, eval_error er, unsigned min_prec)
       switch (et)
         {
         case EXPONENT:
-          /* Minimize undefined C behavior on overflow.  This code assumes
-             that the implementation-defined overflow when casting
-             unsigned to signed is a silent twos-complement
-             wrap-around.  */
           if (v2 < 0)
             er = NEGATIVE_EXPONENT;
-          else if (*v1 == 0 && v2 == 0)
-            er = DIVIDE_ZERO;
+          else if (v2 == 0)
+            {
+              if (!*v1)
+                er = DIVIDE_ZERO;
+              *v1 = 1;
+            }
           else
             {
-              u1 = *v1;
-              u2 = v2;
-              u3 = 1;
-              while (u2)
+              ival u1 = *v1, u2 = v2, u3 = 1;
+              bool v = false;
+              while (true)
                 {
                   if (u2 & 1)
-                    u3 *= u1;
-                  u1 *= u1;
+                    v |= ckd_mul (&u3, u3, u1);
                   u2 >>= 1;
+                  if (!u2)
+                    break;
+                  v |= ckd_mul (&u1, u1, u1);
                 }
-              *v1 = u3;
+              if (v && !IVAL_32_BIT)
+                er = INTEGER_OVERFLOW;
+              *v1 = toival (u3);
             }
           break;
 
         case TIMES:
-          *v1 = (int32_t) ((uint32_t) *v1 * (uint32_t) v2);
+          {
+            ival product;
+            if (ckd_mul (&product, *v1, v2) && !IVAL_32_BIT)
+              er = INTEGER_OVERFLOW;
+            *v1 = toival (product);
+          }
           break;
         case DIVIDE:
           if (v2 == 0)
             er = DIVIDE_ZERO;
-          else if (v2 == -1)
-            /* Avoid overflow, and the x86 SIGFPE on INT_MIN / -1.  */
-            *v1 = (int32_t) -(uint32_t) *v1;
+          else if (v2 == -1 && *v1 < -IVAL_MAX)
+            {
+              /* Avoid undefined behavior on IVAL_MIN / -1.  */
+              if (ckd_sub (v1, 0, *v1) && !IVAL_32_BIT)
+                er = INTEGER_OVERFLOW;
+              *v1 = toival (*v1);
+            }
           else
             *v1 /= v2;
           break;
@@ -444,28 +460,47 @@ parse_expr (int32_t *v1, eval_error er, unsigned min_prec)
           if (v2 == 0)
             er = MODULO_ZERO;
           else if (v2 == -1)
-            /* Avoid the x86 SIGFPE on INT_MIN % -1.  */
+            /* Avoid undefined behavior on IVAL_MIN % -1.  */
             *v1 = 0;
           else
             *v1 %= v2;
           break;
 
         case PLUS:
-          *v1 = (int32_t) ((uint32_t) *v1 + (uint32_t) v2);
+          if (ckd_add (v1, *v1, v2) && !IVAL_32_BIT)
+            er = INTEGER_OVERFLOW;
+          *v1 = toival (*v1);
           break;
         case MINUS:
-          *v1 = (int32_t) ((uint32_t) *v1 - (uint32_t) v2);
+          if (ckd_sub (v1, *v1, v2) && !IVAL_32_BIT)
+            er = INTEGER_OVERFLOW;
+          *v1 = toival (*v1);
           break;
 
-        case LSHIFT:
-          u1 = *v1;
-          u1 <<= (uint32_t) (v2 & 0x1f);
-          *v1 = u1;
-          break;
         case RSHIFT:
-          u1 = *v1 < 0 ? ~*v1 : *v1;
-          u1 >>= (uint32_t) (v2 & 0x1f);
-          *v1 = *v1 < 0 ? ~u1 : u1;
+          if (ckd_sub (&v2, 0, v2))
+            v2 = IVAL_WIDTH;
+          FALLTHROUGH;
+        case LSHIFT:
+          if (v2 < 0)
+            *v1 = (*v1 < 0
+                   ? ~(-IVAL_WIDTH < v2 ? ~*v1 >> -v2 : 0)
+                   :  (-IVAL_WIDTH < v2 ?  *v1 >> -v2 : 0));
+          else if (v2 < IVAL_WIDTH)
+            {
+              ival shifted;
+              ckd_add (&shifted, (uival) {*v1} << v2, 0);
+              if (!IVAL_32_BIT
+                  && *v1 != (shifted < 0 ? ~(~shifted >> v2) : shifted >> v2))
+                er = INTEGER_OVERFLOW;
+              *v1 = toival (shifted);
+            }
+          else
+            {
+              if (!IVAL_32_BIT && *v1)
+                er = INTEGER_OVERFLOW;
+              *v1 = 0;
+            }
           break;
 
         case GT:
@@ -536,7 +571,7 @@ Warning: recommend ==, not =, for equality operator")));
 `---------------------------------------*/
 
 bool
-evaluate (const char *expr, int32_t *val)
+evaluate (const char *expr, ival *val)
 {
   eval_error err;
 
@@ -562,47 +597,59 @@ evaluate (const char *expr, int32_t *val)
   switch (err)
     {
     case NO_ERROR:
-      break;
+      return false;
 
     case MISSING_RIGHT:
       M4ERROR ((warning_status, 0,
                 _("bad expression in eval (missing right parenthesis): %s"),
-                expr));
+                squote (expr)));
       break;
 
     case SYNTAX_ERROR:
-      M4ERROR ((warning_status, 0, _("bad expression in eval: %s"), expr));
+      M4ERROR ((warning_status, 0, _("bad expression in eval: %s"),
+                squote (expr)));
       break;
 
     case UNKNOWN_INPUT:
       M4ERROR ((warning_status, 0,
-                _("bad expression in eval (bad input): %s"), expr));
+                _("bad expression in eval (bad input): %s"), squote (expr)));
       break;
 
     case EXCESS_INPUT:
       M4ERROR ((warning_status, 0,
-                _("bad expression in eval (excess input): %s"), expr));
+                _("bad expression in eval (excess input): %s"),
+                squote (expr)));
       break;
 
     case INVALID_NUMBER:
-      M4ERROR ((warning_status, 0, _("invalid number in eval: %s"), expr));
+      M4ERROR ((warning_status, 0, _("invalid number in eval: %s"),
+                squote (expr)));
       break;
 
     case INVALID_OPERATOR:
-      M4ERROR ((warning_status, 0, _("invalid operator in eval: %s"), expr));
+      M4ERROR ((warning_status, 0, _("invalid operator in eval: %s"),
+                squote (expr)));
       retcode = EXIT_FAILURE;
       break;
 
     case DIVIDE_ZERO:
-      M4ERROR ((warning_status, 0, _("divide by zero in eval: %s"), expr));
+      M4ERROR ((warning_status, 0, _("divide by zero in eval: %s"),
+                squote (expr)));
       break;
 
     case MODULO_ZERO:
-      M4ERROR ((warning_status, 0, _("modulo by zero in eval: %s"), expr));
+      M4ERROR ((warning_status, 0, _("modulo by zero in eval: %s"),
+                squote (expr)));
       break;
 
     case NEGATIVE_EXPONENT:
-      M4ERROR ((warning_status, 0, _("negative exponent in eval: %s"), expr));
+      M4ERROR ((warning_status, 0, _("negative exponent in eval: %s"),
+                squote (expr)));
+      break;
+
+    case INTEGER_OVERFLOW:
+      M4ERROR ((warning_status, 0, _("numeric overflow detected in eval: %s"),
+                squote (expr)));
       break;
 
     default:
@@ -611,5 +658,5 @@ evaluate (const char *expr, int32_t *val)
       abort ();
     }
 
-  return err != NO_ERROR;
+  return true;
 }

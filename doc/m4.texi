@@ -266,7 +266,7 @@ Fast loading of frozen state
 Compatibility with other versions of @code{m4}
 
 * Extensions::                  Extensions in GNU M4
-* Incompatibilities::           Facilities in System V m4 not in GNU M4
+* Incompatibilities::           Facilities in POSIX but not in GNU M4
 * Other Incompatibilities::     Other incompatibilities
 
 Correct version of some examples
@@ -328,14 +328,14 @@ etc.@dots{}  @code{m4} can be used either as a front-end to a compiler,
 or as a macro processor in its own right.
 
 The @code{m4} macro processor is widely available on all UNIXes, and has
-been standardized by POSIX.
+been standardized by POSIX@.
 Usually, only a small percentage of users are aware of its existence.
 However, those who find it often become committed users.  The
 popularity of GNU Autoconf, which requires GNU
 @code{m4} for @emph{generating} @file{configure} scripts, is an incentive
 for many to install it, while these people will not themselves
-program in @code{m4}.  GNU @code{m4} is mostly compatible with the
-System V, Release 4 version, except for some minor differences.
+program in @code{m4}.  GNU @code{m4} is mostly compatible with POSIX and
+with the System V Release 4 version, except for some minor differences.
 @xref{Compatibility}, for more details.
 
 Some people find @code{m4} to be fairly addictive.  They first use
@@ -788,7 +788,7 @@ environment.
 @item -G
 @itemx --traditional
 Suppress all the extensions made in this implementation, compared to the
-System V version.  @xref{Compatibility}, for a list of these.
+POSIX specification.  @xref{Compatibility}, for a list of these.
 
 @item -H @var{num}
 @itemx --hashsize=@var{num}
@@ -982,7 +982,7 @@ options.
 @comment xerr: ignore
 @comment options: Makefile/
 @example
-@error{}m4: cannot open `Makefile/': Not a directory
+@error{}m4: cannot open 'Makefile/': Not a directory
 @end example
 
 @comment Test that closed stderr does not cause a crash.  Not all
@@ -2374,7 +2374,7 @@ $ @kbd{m4 -d}
 defn(`defn')
 @result{}
 define(defn(`divnum'), `cannot redefine a builtin token')
-@error{}m4:stdin:2: Warning: define: invalid macro name ignored
+@error{}m4:stdin:2: Warning: `define': invalid macro name ignored
 @result{}
 divnum
 @result{}0
@@ -2575,10 +2575,10 @@ string.
 @example
 $ @kbd{m4 -d}
 indir(defn(`defn'), `divnum')
-@error{}m4:stdin:1: Warning: indir: invalid macro name ignored
+@error{}m4:stdin:1: Warning: `indir': invalid macro name ignored
 @result{}
 indir(`define', defn(`defn'), `divnum')
-@error{}m4:stdin:2: Warning: define: invalid macro name ignored
+@error{}m4:stdin:2: Warning: `define': invalid macro name ignored
 @result{}
 indir(`define', `foo', defn(`divnum'))
 @result{}
@@ -2675,8 +2675,7 @@ builtin(`builtin',)
 @result{}
 builtin(`builtin', ``'
 ')
-@error{}m4:stdin:5: undefined builtin ``'
-@error{}'
+@error{}m4:stdin:5: undefined builtin ``'\n'
 @result{}
 indir(`index')
 @error{}m4:stdin:7: Warning: too few arguments to builtin `index'
@@ -4146,8 +4145,8 @@ to macro tracing.
 $ @kbd{m4 -dip -I examples}
 @error{}m4debug: input read from stdin
 include(`foo')dnl
-@error{}m4debug: path search for `foo' found `examples/foo'
-@error{}m4debug: input read from examples/foo
+@error{}m4debug: path search for 'foo' found 'examples/foo'
+@error{}m4debug: input read from 'examples/foo'
 @result{}bar
 @error{}m4debug: input reverted to stdin, line 1
 ^D
@@ -4287,6 +4286,10 @@ quoting is disabled.  Otherwise, if @var{end} is missing or void, the
 default end-quote delimiter (@code{'}) is used.  The quote delimiters
 can be of any length.
 
+Changing quotes also affects how later diagnostics quote text strings.
+Any diagnostics issued for @code{changequote} itself depend on the old
+quotes, not the new ones.
+
 The expansion of @code{changequote} is void.
 @end deffn
 
@@ -4297,6 +4300,12 @@ define([foo], [Macro [foo].])
 @result{}
 foo
 @result{}Macro foo.
+changequote([`], ['], [ouch])
+@error{}m4:stdin:4: Warning: excess arguments to builtin [changequote] ignored
+@result{}
+changequote([/], [\], ouch)
+@error{}m4:stdin:5: Warning: excess arguments to builtin `changequote' ignored
+@result{}
 @end example
 
 The quotation strings can safely contain non-@sc{ascii} characters.
@@ -5168,10 +5177,10 @@ parameters.
 @comment status: 1
 @example
 include(`none')
-@error{}m4:stdin:1: cannot open `none': No such file or directory
+@error{}m4:stdin:1: cannot open 'none': No such file or directory
 @result{}
 include()
-@error{}m4:stdin:2: cannot open `': No such file or directory
+@error{}m4:stdin:2: cannot open '': No such file or directory
 @result{}
 sinclude(`none')
 @result{}
@@ -5247,7 +5256,7 @@ using @code{undivert} (@pxref{Undivert}) on a named file.
 @comment xerr: ignore
 @example
 include(`Makefile/')
-@error{}m4:stdin:1: cannot open `Makefile/': Not a directory
+@error{}m4:stdin:1: cannot open 'Makefile/': Not a directory
 @result{}
 @end example
 
@@ -5260,7 +5269,7 @@ include(`Makefile/')
 @comment xerr: ignore
 @example
 include(`.')
-@error{}m4:stdin:1: cannot open `.': Is a directory
+@error{}m4:stdin:1: cannot open '.': Is a directory
 @result{}
 @end example
 
@@ -5932,7 +5941,8 @@ Substrings are extracted with @code{substr}:
 @deffn Builtin substr (@var{string}, @var{from}, @ovar{length})
 Expands to the substring of @var{string}, which starts at index
 @var{from}, and extends for @var{length} characters, or to the end of
-@var{string}, if @var{length} is omitted.  The starting index of a string
+@var{string}, if @var{length} is omitted or would extend past string end.
+The starting index of a string
 is always 0.  The expansion is empty if there is an error parsing
 @var{from} or @var{length}, if @var{from} is beyond the end of
 @var{string}, or if @var{length} is negative.
@@ -6252,18 +6262,11 @@ example shows how @code{format} can be used to produce tabular output.
 $ @kbd{m4 -I examples}
 include(`forloop.m4')
 @result{}
-forloop(`i', `1', `10', `format(`%6d squared is %10d
-', i, eval(i**2))')
-@result{}     1 squared is          1
-@result{}     2 squared is          4
-@result{}     3 squared is          9
-@result{}     4 squared is         16
-@result{}     5 squared is         25
-@result{}     6 squared is         36
-@result{}     7 squared is         49
-@result{}     8 squared is         64
-@result{}     9 squared is         81
-@result{}    10 squared is        100
+forloop(`i', `7', `9', `format(`100**%d = %19d
+', i, eval(100**i))')
+@result{}100**7 =     100000000000000
+@result{}100**8 =   10000000000000000
+@result{}100**9 = 1000000000000000000
 @result{}
 @end example
 
@@ -6272,22 +6275,25 @@ function, and supports these @samp{%} specifiers: @samp{c}, @samp{s},
 @samp{d}, @samp{o}, @samp{x}, @samp{X}, @samp{u}, @samp{a}, @samp{A},
 @samp{e}, @samp{E}, @samp{f}, @samp{F}, @samp{g}, @samp{G}, and
 @samp{%}; it supports field widths and precisions, and the flags
-@samp{+}, @samp{-}, @samp{ }, @samp{0}, @samp{#}, and @samp{'}.  For
-integer specifiers, the width modifiers @samp{hh}, @samp{h}, and
-@samp{l} are recognized, and for floating point specifiers, the width
-modifier @samp{l} is recognized.  Items not yet supported include
+@samp{+}, @samp{-}, @samp{ }, @samp{0}, @samp{#}, and @samp{'}.
+Items not supported include length modifiers,
 positional arguments, the @samp{n}, @samp{p}, @samp{S}, and @samp{C}
-specifiers, the @samp{z}, @samp{t}, @samp{j}, @samp{L} and @samp{ll}
-modifiers, and any platform extensions available in the native
+specifiers, and any platform extensions available in the native
 @code{printf}.  For more details on the functioning of @code{printf},
-see the C Library Manual, or the POSIX specification (for
-example, @samp{%a} is supported even on platforms that haven't yet
-implemented C99 hexadecimal floating point output natively).
+see the C Library Manual, or the POSIX specification.
 
-Unrecognized specifiers result in a warning.  It is anticipated that a
-future release of GNU @code{m4} will support more specifiers,
-and give better warnings when various problems such as overflow are
-encountered.  Likewise, escape sequences are not yet recognized.
+Integers to be formatted should fall in the same range as that of @code{eval}.
+@xref{Eval}.
+Widths, precisions and floating point arguments are subject to machine limits
+that may differ from that of @code{eval}.
+Output might be rounded incorrectly for floating point arguments that
+do not have exact machine equivalents.
+Integer overflows result in output that is numerically correct but might
+use the wrong format.
+Numeric overflows result in a warning.
+
+Unrecognized specifiers also result in a warning.
+Likewise, escape sequences are not yet recognized.
 
 @example
 format(`%p', `0')
@@ -6297,13 +6303,21 @@ format(`%p', `0')
 
 @ignore
 @comment Expose a crash with a bad format string fixed in 1.4.15.
-@comment Unfortuntely, 8-bit bytes are hard to check for; but the
+@comment Unfortunately, 8-bit bytes are hard to check for; but the
 @comment exit status is enough to sniff the crash in broken versions.
 
 @comment xerr: ignore
 @example
 format(`%'format(`%c', `128'))
 @result{}
+@end example
+
+@comment Check that overflowing integers are formatted as strings.
+
+@comment xerr: ignore
+@example
+format(`%d', `-999999999999999999999999999999999999999999999999999999999999')
+@result{}-999999999999999999999999999999999999999999999999999999999999
 @end example
 @end ignore
 
@@ -6312,8 +6326,8 @@ format(`%'format(`%c', `128'))
 
 @cindex arithmetic
 @cindex integer arithmetic
-Integer arithmetic is included in @code{m4}, with a C-like syntax.  As
-convenient shorthands, there are builtins for simple increment and
+Integer arithmetic is included in @code{m4}, with a C-like syntax.
+For convenience, there are builtins for simple increment and
 decrement operations.
 
 @menu
@@ -6333,7 +6347,8 @@ Increment and decrement of integers are supported using the builtins
 @deffnx Builtin decr (@var{number})
 Expand to the numerical value of @var{number}, incremented
 or decremented, respectively, by one.  Except for the empty string, the
-expansion is empty if @var{number} could not be parsed.
+expansion is empty if @var{number} could not be parsed or is outside
+the range of @code{eval} (@pxref{Eval}).
 
 The macros @code{incr} and @code{decr} are recognized only with
 parameters.
@@ -6394,9 +6409,12 @@ Expands to the value of @var{expression}.  The expansion is empty
 if a problem is encountered while parsing the arguments.  If specified,
 @var{radix} and @var{width} control the format of the output.
 
-Calculations are done with 32-bit signed numbers.  Overflow silently
-results in wraparound.  A warning is issued if division by zero is
-attempted, or if @var{expression} could not be parsed.
+Calculations are done with signed integers of at least 64 bits.  A
+warning is issued if @var{expression} could not be parsed, or if
+overflow occurs, or if division by zero is attempted.  If a warning is
+issued, the result is the empty string.  These behaviors are GNU
+extensions, as POSIX leaves the behavior undefined if expressions are
+ill-formed or if computation would go outside 32-bit range.
 
 Expressions can contain the following operators, listed in order of
 decreasing precedence.
@@ -6407,9 +6425,9 @@ Parentheses
 @item +  -  ~  !
 Unary plus and minus, and bitwise and logical negation
 @item **
-Exponentiation
+Exponentiation (a GNU extension)
 @item *  /  %
-Multiplication, division, and modulo
+Multiplication, division, and remainder
 @item +  -
 Addition and subtraction
 @item <<  >>
@@ -6439,10 +6457,9 @@ operators that perform variable assignment, such as @samp{+=} or
 constants, not variables.  Attempting to use them results in an error.
 However, since traditional implementations treated @samp{=} as an
 undocumented alias for @samp{==} as opposed to an assignment operator,
-this usage is supported as a special case.  Be aware that a future
-version of GNU M4 may support assignment semantics as an
-extension when POSIX mode is not requested, and that using
-@samp{=} to check equality is not portable.
+this usage is supported as a special case, albeit with a warning.
+A future version of GNU M4 may support assignment semantics as an
+extension to POSIX, so using @samp{=} to check equality is not portable.
 
 @comment status: 1
 @example
@@ -6450,13 +6467,13 @@ eval(`2 = 2')
 @error{}m4:stdin:1: Warning: recommend ==, not =, for equality operator
 @result{}1
 eval(`++0')
-@error{}m4:stdin:2: invalid operator in eval: ++0
+@error{}m4:stdin:2: invalid operator in eval: `++0'
 @result{}
 eval(`0 |= 1')
-@error{}m4:stdin:3: invalid operator in eval: 0 |= 1
+@error{}m4:stdin:3: invalid operator in eval: `0 |= 1'
 @result{}
 eval(`(1 += 2)')
-@error{}m4:stdin:4: invalid operator in eval: (1 += 2)
+@error{}m4:stdin:4: invalid operator in eval: `(1 += 2)'
 @result{}
 @end example
 
@@ -6472,8 +6489,8 @@ identical instead of lower than the relational operators such as
 1.4.9, GNU M4 correctly follows POSIX precedence
 rules.  M4 scripts designed to be portable between releases must be
 aware that parentheses may be required to enforce C precedence rules.
-Likewise, division by zero, even in the unused branch of a
-short-circuiting operator, is not always well-defined in other
+Likewise, integer overflow and division by zero, even in the unused branch
+of a short-circuiting operator, are not always well-defined in other
 implementations.
 
 Following are some examples where the current version of M4 follows C
@@ -6497,20 +6514,20 @@ eval(`(1 | 1) ^ 1')
 eval(`+ + - ~ ! ~ 0')
 @result{}1
 eval(`1 / 0 + 1')
-@error{}m4:stdin:8: divide by zero in eval: 1 / 0 + 1
+@error{}m4:stdin:8: divide by zero in eval: `1 / 0 + 1'
 @result{}
 eval(`1 / 0 || 1 / 0')
-@error{}m4:stdin:9: divide by zero in eval: 1 / 0 || 1 / 0
+@error{}m4:stdin:9: divide by zero in eval: `1 / 0 || 1 / 0'
 @result{}
 eval(`2 || 1 / 0')
 @result{}1
 eval(`0 || 1 / 0')
-@error{}m4:stdin:11: divide by zero in eval: 0 || 1 / 0
+@error{}m4:stdin:11: divide by zero in eval: `0 || 1 / 0'
 @result{}
 eval(`0 && (1 % 0)')
 @result{}0
 eval(`2 && (1 % 0)')
-@error{}m4:stdin:13: modulo by zero in eval: 2 && (1 % 0)
+@error{}m4:stdin:13: modulo by zero in eval: `2 && (1 % 0)'
 @result{}
 @end example
 
@@ -6531,24 +6548,55 @@ eval(`2 ** 0')
 @result{}1
 eval(`0 ** 0')
 @result{}
-@error{}m4:stdin:5: divide by zero in eval: 0 ** 0
+@error{}m4:stdin:5: divide by zero in eval: `0 ** 0'
 eval(`4 ** -2')
-@error{}m4:stdin:6: negative exponent in eval: 4 ** -2
+@error{}m4:stdin:6: negative exponent in eval: `4 ** -2'
 @result{}
 @end example
 
 @ignore
 @comment This test makes sure the algorithm is fast, but does not
 @comment need to be displayed as-is in the manual.
+@comment The 86714325046 makes the test portable (albeit slow!)
+@comment to a hypothetical version of GNU m4 that uses libgmp for arithmetic.
+@comment libgmp goes up to 2**2**37,
+@comment and 86714325046 == ceil (2**37 * log(2)/log(3)).
 
+@comment options: -E
+@comment status: 1
 @example
-eval(`3**2000000000')
-@result{}632360961
+eval(`3**86714325046')
+@error{}m4:stdin:1: numeric overflow detected in eval: `3**86714325046'
+@result{}
+eval(`0**86714325046')
+@result{}0
+eval(`1**86714325046')
+@result{}1
+eval(`-1**86714325046')
+@result{}1
+eval(`-1**86714325047')
+@result{}-1
 define(`loop', `ifelse(`$1', `1000', `pass',
-`loop(eval($1+!!(3**2000000000)))')')loop(0)
+`loop(eval($1+!!(1**86714325046)))')')loop(0)
 @result{}pass
-define(`check', `ifelse(`$1', `100', `pass', `$2', eval(-3**$1),
-`check(incr($1), eval(-3*$2))', `oops')')check(0, 1)
+@end example
+
+@comment The 40 below tests that eval computes with at least 64 bits,
+@comment as 3**39 < 2**63 < 3**40.
+@comment xerr: ignore
+@comment options: -E
+@comment status: 1
+@example
+dnl libgmp goes up to 2**2**37,
+dnl and 86714325046 == ceil (2**37 * log(2)/log(3)).
+define(`check',
+  `ifelse(`$1', `86714325046', `tired of testing',
+          `$2', eval(`-3 ** $1'),
+            `ifelse(`$2',,
+                       `ifelse(eval(`$1 < 40'), `1', `oops ($1 < 40)',
+                                    `pass')',
+                    `check(incr($1), eval(`-3 * $2'))')',
+          `oops ($2 != eval(`-3 ** $1'))')')check(0, 1)
 @result{}pass
 @end example
 @end ignore
@@ -6556,7 +6604,7 @@ define(`check', `ifelse(`$1', `100', `pass', `$2', eval(-3**$1),
 Within @var{expression}, (but not @var{radix} or @var{width}), numbers
 without a special prefix are decimal.  A simple @samp{0} prefix
 introduces an octal number.  @samp{0x} introduces a hexadecimal number.
-As GNU extensions, @samp{0b} introduces a binary number.
+As GNU extensions, @samp{0b} introduces a binary number, and
 @samp{0r} introduces a number expressed in any radix between 1 and 36:
 the prefix should be immediately followed by the decimal expression of
 the radix, a colon, then the digits making the number.  For radix 1,
@@ -6564,7 +6612,7 @@ leading zeros are ignored, and all remaining digits must be @samp{1};
 for all other radices, the digits are @samp{0}, @samp{1}, @samp{2},
 @dots{}.  Beyond @samp{9}, the digits are @samp{a}, @samp{b} @dots{} up
 to @samp{z}.  Lower and upper case letters can be used interchangeably
-in numbers prefixes and as number digits.
+in number prefixes and as number digits.
 
 Parentheses may be used to group subexpressions whenever needed.  For the
 relational operators, a true relation returns @code{1}, and a false
@@ -6592,18 +6640,18 @@ square(`9')
 square(square(`5')` + 1')
 @result{}676
 eval(`1+')
-@error{}m4:stdin:10: bad expression in eval: 1+
+@error{}m4:stdin:10: bad expression in eval: `1+'
 @result{}
 eval(`0x')
-@error{}m4:stdin:11: invalid number in eval: 0x
+@error{}m4:stdin:11: invalid number in eval: `0x'
 @result{}
 eval(`01239')
-@error{}m4:stdin:12: invalid number in eval: 01239
+@error{}m4:stdin:12: invalid number in eval: `01239'
 @result{}
 define(`foo', `666')
 @result{}
 eval(`foo / 6')
-@error{}m4:stdin:14: bad expression in eval (bad input): foo / 6
+@error{}m4:stdin:14: bad expression in eval (bad input): `foo / 6'
 @result{}
 eval(foo / 6)
 @result{}111
@@ -6614,31 +6662,35 @@ names, even if they expand to a valid expression (or part of a valid
 expression).  Therefore all macros must be expanded before they are
 passed to @code{eval}.
 
-Some calculations are not portable to other implementations, since they
-have undefined semantics in C, but GNU @code{m4} has
-well-defined behavior on overflow.  When shifting, an out-of-range shift
-amount is implicitly brought into the range of 32-bit signed integers
-using an implicit bit-wise and with 0x1f).
+GNU M4 has well-defined behavior for some calculations that have
+undefined behavior in C and are therefore not portable to other
+implementations, including to GNU M4 1.4.21 and earlier.
+Remaindering always yields the numerically correct answer.
+Shifts work reliably on negative numbers:
+a left shift multiplies by a power of two,
+a right shift divides by a power of two and truncates towards minus infinity,
+and a shift by a negative count goes in the opposite direction.
+Overflow in shifting is treated like any other integer overflow.
 
 @example
-define(`max_int', eval(`0x7fffffff'))
+define(`int64_max', eval(`0x7fffffffffffffff'))
 @result{}
-define(`min_int', incr(max_int))
+define(`int64_min', `(-1-'int64_max`)')
 @result{}
-eval(min_int` < 0')
+eval(int64_min` < 0')
 @result{}1
-eval(max_int` > 0')
+eval(int64_max` > 0')
 @result{}1
-ifelse(eval(min_int` / -1'), min_int, `overflow occurred')
-@result{}overflow occurred
-min_int
-@result{}-2147483648
-eval(`0x80000000 % -1')
+eval(int64_min)
+@result{}-9223372036854775808
+eval(int64_min` % -1')
 @result{}0
 eval(`-4 >> 1')
 @result{}-2
-eval(`-4 >> 33')
-@result{}-2
+eval(`-4 >> -6')
+@result{}-256
+eval(`-4 >> 1024')
+@result{}-1
 @end example
 
 If @var{radix} is specified, it specifies the radix to be used in the
@@ -7011,30 +7063,28 @@ Expands to the quoted name of a new, empty file, made from the string
 @var{template}, which should end with the string @samp{XXXXXX}.  The six
 @samp{X} characters are then replaced with random characters matching
 the regular expression @samp{[a-zA-Z0-9._-]}, in order to make the file
-name unique.  If fewer than six @samp{X} characters are found at the end
-of @code{template}, the result will be longer than the template.  The
+name unique.  The
 created file will have access permissions as if by @kbd{chmod =rw,go=},
 meaning that the current umask of the @code{m4} process is taken into
 account, and at most only the current user can read and write the file.
 
-The traditional behavior, standardized by POSIX, is that
-@code{maketemp} merely replaces the trailing @samp{X} with the process
-id, without creating a file or quoting the expansion, and without
-ensuring that the resulting
-string is a unique file name.  In part, this means that using the same
-@var{template} twice in the same input file will result in the same
-expansion.  This behavior is a security hole, as it is very easy for
-another process to guess the name that will be generated, and thus
-interfere with a subsequent use of @code{syscmd} trying to manipulate
-that file name.  Hence, POSIX has recommended that all new
-implementations of @code{m4} provide the secure @code{mkstemp} builtin,
-and that users of @code{m4} check for its existence.
-
 The expansion is void and an error issued if a temporary file could
 not be created.
 
-The macros @code{mkstemp} and @code{maketemp} are recognized only with
-parameters.
+@cindex GNU extensions
+Unless the @option{--traditional} (@option{-G}) command line option is
+in effect (@pxref{Limits control, , Invoking m4}),
+the GNU version of @code{mkstemp} is forgiving if its argument ends
+in fewer than six @samp{X} characters:
+it replaces the smaller number of @samp{X} characters that it does find.
+However, the result will be longer than the template.
+
+Unless @option{--traditional} (@option{-G}) is in effect, the
+@code{maketemp} macro is an alias for @code{mkstemp}.
+It is present for partial compatibility with older @code{m4} versions.
+New programs should not use @code{maketemp}.
+
+The @code{mkstemp} macro is recognized only with parameters.
 @end deffn
 
 If you try this next example, you will most likely get different output
@@ -7046,29 +7096,11 @@ chosen:
 $ @kbd{m4}
 define(`tmp', `oops')
 @result{}
-maketemp(`/tmp/fooXXXXXX')
+mkstemp(`/tmp/fooXXXXXX')
 @result{}/tmp/fooa07346
-ifdef(`mkstemp', `define(`maketemp', defn(`mkstemp'))',
-      `define(`mkstemp', defn(`maketemp'))dnl
-errprint(`warning: potentially insecure maketemp implementation
-')')
-@result{}
 mkstemp(`doc')
 @result{}docQv83Uw
 @end example
-
-@cindex GNU extensions
-Unless you use the @option{--traditional} command line option (or
-@option{-G}, @pxref{Limits control, , Invoking m4}), the GNU
-version of @code{maketemp} is secure.  This means that using the same
-template to multiple calls will generate multiple files.  However, we
-recommend that you use the new @code{mkstemp} macro, introduced in
-GNU M4 1.4.8, which is secure even in traditional mode.  Also,
-as of M4 1.4.11, the secure implementation quotes the resulting file
-name, so that you are guaranteed to know what file was created even if
-the random file name happens to match an existing macro.  Notice that
-this example is careful to use @code{defn} to avoid unintended expansion
-of @samp{foo}.
 
 @example
 $ @kbd{m4}
@@ -7076,11 +7108,11 @@ define(`foo', `errprint(`oops')')
 @result{}
 syscmd(`rm -f foo-??????')sysval
 @result{}0
-define(`file1', maketemp(`foo-XXXXXX'))dnl
+define(`file1', mkstemp(`foo-XXXXXX'))dnl
 ifelse(esyscmd(`echo \` foo-?????? \''), ` foo-?????? ',
        `no file', `created')
 @result{}created
-define(`file2', maketemp(`foo-XX'))dnl
+define(`file2', mkstemp(`foo-XX'))dnl
 define(`file3', mkstemp(`foo-XXXXXX'))dnl
 ifelse(len(defn(`file1')), len(defn(`file2')),
        `same length', `different')
@@ -7110,25 +7142,6 @@ len(mkstemp(`foodir/fooXXXXX'))
 @result{}16
 syscmd(`rm -r foodir')sysval
 @result{}0
-@end example
-
-@c Likewise, and ensure that traditional mode leaves the result unquoted
-@c without creating a file.
-
-@comment options: -G
-@example
-syscmd(`rm -f foo-*')sysval
-@result{}0
-len(maketemp(`foo-XXXXX'))
-@error{}m4:stdin:2: recommend using mkstemp instead
-@result{}9
-define(`abc', `def')
-@result{}
-maketemp(`foo-abc')
-@result{}foo-def
-@error{}m4:stdin:4: recommend using mkstemp instead
-syscmd(`test -f foo-*')ifelse(sysval, `0', `0', `1')
-@result{}1
 @end example
 @end ignore
 
@@ -7480,7 +7493,7 @@ syscmd([echo 'changequote([,])pushdef([divnum],[hi])dnl' \
 @example
 $ @kbd{m4 -F /none/such}
 ^D
-@error{}m4: cannot open `/none/such': No such file or directory
+@error{}m4: cannot open '/none/such': No such file or directory
 @end example
 @end ignore
 
@@ -7503,7 +7516,7 @@ exit with status 63 to indicate version mismatch.
 
 @cindex frozen file format
 @cindex file format, frozen file
-Frozen files are sharable across architectures.  It is safe to write
+Frozen files are shareable across architectures.  It is safe to write
 a frozen file on one machine and read it on another, given that the
 second machine uses the same or newer version of GNU @code{m4}.
 It is conventional, but not required, to give a frozen file the suffix
@@ -7572,22 +7585,19 @@ once.
 
 @cindex compatibility
 This chapter describes the many of the differences between this
-implementation of @code{m4}, and of other implementations found under
-UNIX, such as System V Release 4, Solaris, and BSD flavors.
+implementation of @code{m4}, and of other implementations
+such as BSD flavors, Solaris, and AIX@.
 In particular, it lists the known differences and extensions to
-POSIX.  However, the list is not necessarily comprehensive.
+POSIX@.  However, the list is not comprehensive.
 
-At the time of this writing, POSIX 2001 (also known as IEEE
-Std 1003.1-2001) is the latest standard, although a new version of
-POSIX is under development and includes several proposals for
-modifying what @code{m4} is required to do.  The requirements for
-@code{m4} are shared between SUSv3 and POSIX, and
-can be viewed at
-@uref{https://www.opengroup.org/onlinepubs/@/000095399/@/utilities/@/m4.html}.
+At the time of this writing, POSIX.1-2024 (also known as IEEE
+Std 1003.1-2024) is the latest standard for @code{m4}.
+It can be viewed at
+@uref{https://pubs.opengroup.org/@/onlinepubs/@/9799919799/@/utilities/@/m4.html}.
 
 @menu
 * Extensions::                  Extensions in GNU M4
-* Incompatibilities::           Facilities in System V m4 not in GNU M4
+* Incompatibilities::           Facilities in POSIX m4 not in GNU M4
 * Other Incompatibilities::     Other incompatibilities
 @end menu
 
@@ -7596,15 +7606,15 @@ can be viewed at
 
 @cindex GNU extensions
 @cindex POSIX
-This version of @code{m4} contains a few facilities that do not exist
-in System V @code{m4}.  These extra facilities are all suppressed by
+This version of @code{m4} contains a few facilities not specified
+by POSIX@.  These extra facilities are all suppressed by
 using the @option{-G} command line option (@pxref{Limits control, ,
 Invoking m4}), unless overridden by other command line options.
 
 @itemize @bullet
 @item
 In the @code{$@var{n}} notation for macro arguments, @var{n} can contain
-several digits, while the System V @code{m4} only accepts one digit.
+several digits, while POSIX @code{m4} accepts only one digit.
 This allows macros in GNU @code{m4} to take any number of
 arguments, and not only nine (@pxref{Arguments}).
 
@@ -7625,12 +7635,18 @@ define(`_9', `$9')define(`eleventh', `_9(shift(shift($@@)))')
 dnl Eleventh argument, GNU style
 define(`Eleventh', `$11')
 @result{}
+dnl (2**64 + 1)st argument, GNU style
+define(`Two64plus1st', `$18446744073709551617')
+@result{}
 first1(`a', `b', `c', `d', `e', `f', `g', `h', `i', `j', `k')
 @result{}A1
 eleventh(`a', `b', `c', `d', `e', `f', `g', `h', `i', `j', `k')
 @result{}k
 Eleventh(`a', `b', `c', `d', `e', `f', `g', `h', `i', `j', `k')
 @result{}k
+dnl Missing arguments are taken to be empty.
+Two64plus1st(`a', `b', `c')
+@result{}
 @end example
 
 @noindent
@@ -7686,9 +7702,9 @@ The destination of trace and debug output can be controlled with
 @code{debugfile} (@pxref{Debug Output}).
 
 @item
-The @code{maketemp} (@pxref{Mkstemp}) macro behaves like @code{mkstemp},
-creating a new file with a unique name on every invocation, rather than
-following the insecure behavior of replacing the trailing @samp{X}
+The @code{maketemp} (@pxref{Mkstemp}) macro is an alias for @code{mkstemp}.
+In some older @code{m4} implementations, this macro instead
+follows the insecure behavior of replacing the trailing @samp{X}
 characters with the @code{m4} process id.
 
 @item
@@ -7702,10 +7718,8 @@ more extensive than in most other versions of @code{m4}.
 @end itemize
 
 @node Incompatibilities
-@section Facilities in System V @code{m4} not in GNU @code{m4}
+@section Facilities in POSIX @code{m4} not in GNU @code{m4}
 
-The version of @code{m4} from System V contains a few facilities that
-have not been implemented in GNU @code{m4} yet.  Additionally,
 POSIX requires some behaviors that GNU @code{m4} has not
 implemented yet.  Relying on these behaviors is non-portable, as a
 future release of GNU @code{m4} may change.
@@ -7725,8 +7739,8 @@ results.
 @item
 POSIX requires an application to exit with non-zero status if
 it wrote an error message to stderr.  This has not yet been consistently
-implemented for the various builtins that are required to issue an error
-(such as @code{eval} (@pxref{Eval}) when an argument cannot be parsed).
+implemented for the various builtins that are required to issue an error,
+such as @code{eval} (@pxref{Eval}) when an argument cannot be parsed.
 
 @item
 Some traditional implementations only allow reading standard input
@@ -7751,42 +7765,27 @@ arguments, giving @code{adefineb} for the above example.
 
 @item
 Traditional implementations handle @code{define(`f',`1')} (@pxref{Define})
-by undefining the entire stack of previous definitions, and if doing
+by undefining the entire stack of previous definitions, as if doing
 @code{undefine(`f')} first.  GNU @code{m4} replaces just the top
 definition on the stack, as if doing @code{popdef(`f')} followed by
 @code{pushdef(`f',`1')}.  POSIX allows either behavior.
 
 @item
-POSIX 2001 requires @code{syscmd} (@pxref{Syscmd}) to evaluate
-command output for macro expansion, but this was a mistake that is
-anticipated to be corrected in the next version of POSIX.
-GNU @code{m4} follows traditional behavior in @code{syscmd}
-where output is not rescanned, and provides the extension @code{esyscmd}
-that does scan the output.
-
-@item
-At one point, POSIX required @code{changequote(@var{arg})}
-(@pxref{Changequote}) to use newline as the close quote, but this was a
-bug, and the next version of POSIX is anticipated to state
-that using empty strings or just one argument is unspecified.
-Meanwhile, the GNU @code{m4} behavior of treating an empty
+POSIX states that behavior is unspecified if @code{changequote} is given
+just one argument, or if either argument is provided but empty,
+or if either argument contains letters, digits, underscore, or @samp{(}.
+The GNU @code{m4} behavior of treating an empty
 end-quote delimiter as @samp{'} is not portable, as Solaris treats it as
 repeating the start-quote delimiter, and BSD treats it as leaving the
 previous end-quote delimiter unchanged.  For predictable results, never
-call changequote with just one argument, or with empty strings for
-arguments.
+call changequote with empty strings for arguments.
+POSIX requires support only for strings containing five characters or less.
 
 @item
-At one point, POSIX required @code{changecom(@var{arg},)}
-(@pxref{Changecom}) to make it impossible to end a comment, but this is
-a bug, and the next version of POSIX is anticipated to state
-that using empty strings is unspecified.  Meanwhile, the GNU
-@code{m4} behavior of treating an empty end-comment delimiter as newline
-is not portable, as BSD treats it as leaving the previous end-comment
-delimiter unchanged.  It is also impossible in BSD implementations to
-disable comments, even though that is required by POSIX.  For
-predictable results, never call changecom with empty strings for
-arguments.
+POSIX states that behavior is unspecified if either argument of
+@code{changecom} is provided but empty,
+or if either argument contains letters, digits, underscore, or @samp{(}.
+POSIX requires support only for strings containing five characters or less.
 
 @item
 Most implementations of @code{m4} give macros a higher precedence than
@@ -7839,36 +7838,23 @@ equality operators (@samp{==} and @samp{!=}) had the same precedence as
 relational operators (such as @samp{<}).  Use explicit parentheses to
 ensure proper precedence.  As extensions to POSIX,
 GNU @code{m4} gives well-defined semantics to operations that
-C leaves undefined, such as when overflow occurs, when shifting negative
-numbers, or when performing division by zero.  POSIX also
-requires @samp{=} to cause an error, but many traditional
-implementations allowed it as an alias for @samp{==}.
-
-@item
-POSIX 2001 requires @code{translit} (@pxref{Translit}) to
-treat each character of the second and third arguments literally.
-However, it is anticipated that the next version of POSIX will
-allow the GNU @code{m4} behavior of treating @samp{-} as a
-range operator.
+POSIX leaves undefined, such as when overflow occurs, when shifting negative
+numbers, or when dividing by zero.  Many traditional
+implementations accepted @samp{=} as an alias for @samp{==};
+GNU @code{m4} issues a warning.
 
 @item
 POSIX requires @code{m4} to honor the locale environment
-variables of @env{LANG}, @env{LC_ALL}, @env{LC_CTYPE},
-@env{LC_MESSAGES}, and @env{NLSPATH}, but this has not yet been
-implemented in GNU @code{m4}.
-
-@item
-POSIX states that only unquoted leading newlines and blanks
-(that is, space and tab) are ignored when collecting macro arguments.
-However, this appears to be a bug in POSIX, since most
-traditional implementations also ignore all whitespace (formfeed,
-carriage return, and vertical tab).  GNU @code{m4} follows
-tradition and ignores all leading unquoted whitespace.
+variables @env{LANG}, @env{LC_ALL}, and @env{LC_CTYPE}
+to determining which multibyte sequences are characters,
+but this has not yet been implemented in GNU @code{m4}.
+GNU @code{m4} does support those variables, along with
+@env{LC_MESSAGES} and @env{NLSPATH}, when outputting diagnostics.
 
 @item
 @cindex @env{POSIXLY_CORRECT}
 A strictly-compliant POSIX client is not allowed to use
-command-line arguments not specified by POSIX.  However, since
+command-line arguments not specified by POSIX@.  However, since
 this version of M4 ignores @env{POSIXLY_CORRECT} and enables the option
 @code{--gnu} by default (@pxref{Limits control, , Invoking m4}), a
 client desiring to be strictly compliant has no way to disable
@@ -7962,7 +7948,7 @@ traditional programming languages.
 @node Answers
 @chapter Correct version of some examples
 
-Some of the examples in this manuals are buggy or not very robust, for
+Some of the examples in this manual are buggy or not very robust, for
 demonstration purposes.  Improved versions of these composite macros are
 presented here.
 
@@ -8032,7 +8018,7 @@ forloop(`', `1', `2', ` odd iterator name')
 forloop(`i', `5 + 5', `0xc', ` 0x`'eval(i, `16')')
 @result{} 0xa 0xb 0xc
 forloop(`i', `a', `b', `non-numeric bounds')
-@error{}m4:stdin:6: bad expression in eval (bad input): (a) <= (b)
+@error{}m4:stdin:6: bad expression in eval (bad input): `(a) <= (b)'
 @result{}
 @end example
 

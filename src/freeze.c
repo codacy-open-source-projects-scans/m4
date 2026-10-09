@@ -23,6 +23,8 @@
 
 #include "m4.h"
 
+#include <stdckdint.h>
+
 /*-------------------------------------------------------------------.
 | Destructively reverse a symbol list and return the reversed list.  |
 `-------------------------------------------------------------------*/
@@ -61,9 +63,9 @@ freeze_symbol (symbol *sym, void *arg)
       switch (SYMBOL_TYPE (sym))
         {
         case TOKEN_TEXT:
-          xfprintf (file, "T%d,%d\n",
-                    (int) strlen (SYMBOL_NAME (sym)),
-                    (int) strlen (SYMBOL_TEXT (sym)));
+          xfprintf (file, "T%zu,%zu\n",
+                    strlen (SYMBOL_NAME (sym)),
+                    strlen (SYMBOL_TEXT (sym)));
           fputs (SYMBOL_NAME (sym), file);
           fputs (SYMBOL_TEXT (sym), file);
           fputc ('\n', file);
@@ -77,9 +79,9 @@ freeze_symbol (symbol *sym, void *arg)
 INTERNAL ERROR: builtin not found in builtin table!"));
               abort ();
             }
-          xfprintf (file, "F%d,%d\n",
-                    (int) strlen (SYMBOL_NAME (sym)),
-                    (int) strlen (bp->name));
+          xfprintf (file, "F%zu,%zu\n",
+                    strlen (SYMBOL_NAME (sym)),
+                    strlen (bp->name));
           fputs (SYMBOL_NAME (sym), file);
           fputs (bp->name, file);
           fputc ('\n', file);
@@ -112,7 +114,7 @@ produce_frozen_state (const char *name)
 
   file = fopen (name, O_BINARY ? "wbe" : "we");
   if (!file)
-    m4_failure (errno, _("cannot open `%s'"), name);
+    m4_failure (errno, _("cannot open %s"), sh_quote (name));
 
   /* Write a recognizable header.  */
 
@@ -122,10 +124,10 @@ produce_frozen_state (const char *name)
 
   /* Dump quote delimiters.  */
 
-  if (strcmp (lquote.string, DEF_LQUOTE)
-      || strcmp (rquote.string, DEF_RQUOTE))
+  if (! (streq (lquote.string, DEF_LQUOTE)
+	 && streq (rquote.string, DEF_RQUOTE)))
     {
-      xfprintf (file, "Q%d,%d\n", (int) lquote.length, (int) rquote.length);
+      xfprintf (file, "Q%td,%td\n", lquote.length, rquote.length);
       fputs (lquote.string, file);
       fputs (rquote.string, file);
       fputc ('\n', file);
@@ -133,9 +135,10 @@ produce_frozen_state (const char *name)
 
   /* Dump comment delimiters.  */
 
-  if (strcmp (bcomm.string, DEF_BCOMM) || strcmp (ecomm.string, DEF_ECOMM))
+  if (! (streq (bcomm.string, DEF_BCOMM)
+	 && streq (ecomm.string, DEF_ECOMM)))
     {
-      xfprintf (file, "C%d,%d\n", (int) bcomm.length, (int) ecomm.length);
+      xfprintf (file, "C%td,%td\n", bcomm.length, ecomm.length);
       fputs (bcomm.string, file);
       fputs (ecomm.string, file);
       fputc ('\n', file);
@@ -162,7 +165,7 @@ produce_frozen_state (const char *name)
 `----------------------------------------------------------------------*/
 
 static void
-issue_expect_message (int expected)
+issue_expect_message (char expected)
 {
   if (expected == '\n')
     m4_failure (0, _("expecting line feed in frozen file"));
@@ -181,10 +184,10 @@ reload_frozen_state (const char *name)
 {
   FILE *file;
   int character;
-  int operation;
+  char operation;
   char *string[2];
-  int allocated[2];
-  int number[2];
+  idx_t allocated[2];
+  ival number[2];
   const builtin *bp;
   bool advance_line = true;
 
@@ -202,17 +205,19 @@ reload_frozen_state (const char *name)
     }                                                           \
   while (0)
 
-#define GET_NUMBER(Number, AllowNeg)                            \
+#define GET_NUMBER(Number, Neg)                                 \
   do                                                            \
     {                                                           \
-      unsigned int n = 0;                                       \
-      while (c_isdigit (character) && n <= INT_MAX / 10U)       \
+      ival n = 0;                                               \
+      bool v = false;                                           \
+      while (c_isdigit (character))                             \
         {                                                       \
-          n = 10 * n + character - '0';                         \
+          v |= ckd_mul (&n, n, 10);                             \
+          int d = character - '0';                              \
+          v |= (Neg) ? ckd_sub (&n, n, d) : ckd_add (&n, n, d); \
           GET_CHARACTER;                                        \
         }                                                       \
-      if (((AllowNeg) ? INT_MIN : INT_MAX) + 0U < n             \
-          || c_isdigit (character))                             \
+      if (v)                                                    \
         m4_failure (0, _("integer overflow in frozen file"));   \
       (Number) = n;                                             \
     }                                                           \
@@ -247,14 +252,15 @@ reload_frozen_state (const char *name)
     {                                                                   \
       void *tmp;                                                        \
       char *p;                                                          \
-      if (number[(i)] + 1 > allocated[(i)])                             \
+      if (allocated[(i)] <= number[(i)])                                \
         {                                                               \
           free (string[(i)]);                                           \
-          allocated[(i)] = number[(i)] + 1;                             \
-          string[(i)] = xcharalloc ((size_t) allocated[(i)]);           \
+          if (ckd_add (&allocated[(i)], number[(i)], 1))                \
+            xalloc_die ();                                              \
+          string[(i)] = ximalloc (allocated[(i)]);                      \
         }                                                               \
       if (number[(i)] > 0                                               \
-          && !fread (string[(i)], (size_t) number[(i)], 1, file))       \
+          && !fread (string[(i)], number[(i)], 1, file))                \
         m4_failure (0, _("premature end of frozen file"));              \
       string[(i)][number[(i)]] = '\0';                                  \
       p = string[(i)];                                                  \
@@ -268,13 +274,13 @@ reload_frozen_state (const char *name)
 
   file = m4_path_search (name, !!O_BINARY, NULL);
   if (file == NULL)
-    m4_failure (errno, _("cannot open %s"), name);
+    m4_failure (errno, _("cannot open %s"), sh_quote (name));
   current_file = name;
 
   allocated[0] = 100;
-  string[0] = xcharalloc ((size_t) allocated[0]);
+  string[0] = ximalloc (allocated[0]);
   allocated[1] = 100;
-  string[1] = xcharalloc ((size_t) allocated[1]);
+  string[1] = ximalloc (allocated[1]);
 
   /* Validate format version.  Only `1' is acceptable for now.  */
   GET_DIRECTIVE;
@@ -283,7 +289,8 @@ reload_frozen_state (const char *name)
   GET_NUMBER (number[0], false);
   if (number[0] > 1)
     M4ERROR ((EXIT_MISMATCH, 0,
-              _("frozen file version %d greater than max supported of 1"),
+              _("frozen file version %"PRIdIVAL
+                " greater than max supported of 1"),
               number[0]));
   else if (number[0] < 1)
     m4_failure (0, _("ill-formed frozen file, version directive expected"));
@@ -311,7 +318,6 @@ reload_frozen_state (const char *name)
             {
               GET_CHARACTER;
               GET_NUMBER (number[0], true);
-              number[0] = -number[0];
             }
           else
             GET_NUMBER (number[0], false);
@@ -343,7 +349,12 @@ reload_frozen_state (const char *name)
 
               make_diversion (number[0]);
               if (number[1] > 0)
-                output_text (string[1], number[1]);
+                {
+                  idx_t n;
+                  if (ckd_add (&n, number[1], 0))
+                    m4_failure (0, _("frozen string too long"));
+                  output_text (string[1], n);
+                }
               break;
 
             case 'F':

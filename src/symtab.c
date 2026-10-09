@@ -33,6 +33,8 @@
 
 #include "m4.h"
 #include <limits.h>
+#include <stdbit.h>
+#include <stdckdint.h>
 
 #ifdef DEBUG_SYM
 /* When evaluating hash table performance, this profiling code shows
@@ -40,15 +42,15 @@
 
 struct profile
 {
-  int entry;                    /* Number of times lookup_symbol called with
+  intmax_t entry;               /* Number of times lookup_symbol called with
                                    this mode.  */
-  int allocations;              /* Number of times a symbol is malloc'd.  */
-  int hits;                     /* Number of times a symbol is found.  */
-  int checks;                   /* Number of times a hash is checked.  */
-  int comparisons;              /* Number of times strcmp was called.  */
-  int misses;                   /* Number of times strcmp did not return 0.  */
-  long long bytes_hashed;       /* Number of bytes hashed.  */
-  long long bytes_compared;     /* Number of bytes compared.  */
+  intmax_t allocations;         /* Number of times a symbol is malloc'd.  */
+  intmax_t hits;                /* Number of times a symbol is found.  */
+  intmax_t checks;              /* Number of times a hash is checked.  */
+  intmax_t comparisons;         /* Number of times strcmp was called.  */
+  intmax_t misses;              /* Number of times strcmp did not return 0.  */
+  intmax_t bytes_hashed;        /* Number of bytes hashed.  */
+  intmax_t bytes_compared;      /* Number of bytes compared.  */
 };
 
 static struct profile profiles[5];
@@ -61,9 +63,9 @@ show_profile (void)
   int i;
   for (i = 0; i < 5; i++)
     {
-      xfprintf (stderr, "m4debug: lookup mode %d called %d times, %d hits:\n"
-                "m4debug:  symbols: %d allocs, %d checks, %lld bytes hashed\n"
-                "m4debug:  str: %d compares, %d misses, %lld bytes compared\n",
+      xfprintf (stderr, "m4debug: lookup mode %d called %jd times, %jd hits:\n"
+                "m4debug:  symbols: %jd allocs, %jd checks, %jd bytes hashed\n"
+                "m4debug:  str: %jd compares, %jd misses, %jd bytes compared\n",
                 i, profiles[i].entry, profiles[i].hits,
                 profiles[i].allocations, profiles[i].checks,
                 profiles[i].bytes_hashed, profiles[i].comparisons,
@@ -75,19 +77,15 @@ show_profile (void)
 static int
 profile_strcmp (const char *s1, const char *s2)
 {
-  int i = 1;
+  idx_t i = 0;
   int result;
-  while (*s1 && *s1 == *s2)
-    {
-      s1++;
-      s2++;
-      i++;
-    }
-  result = (unsigned char) *s1 - (unsigned char) *s2;
+  for (; s1[i] && s1[i] == s2[i]; i++)
+    continue;
+  result = to_uchar (s1[i]) - to_uchar (s2[i]);
   profiles[current_mode].comparisons++;
   if (result != 0)
     profiles[current_mode].misses++;
-  profiles[current_mode].bytes_compared += i;
+  profiles[current_mode].bytes_compared += i + 1;
   return result;
 }
 
@@ -96,7 +94,7 @@ profile_strcmp (const char *s1, const char *s2)
 
 
 /*------------------------------------------------------------------.
-| Initialise the symbol table, by allocating the necessary storage, |
+| Initialize the symbol table, by allocating the necessary storage, |
 | and zeroing all the entries.                                      |
 `------------------------------------------------------------------*/
 
@@ -106,13 +104,8 @@ static symbol **symtab;
 void
 symtab_init (void)
 {
-  size_t i;
-  symbol **s;
-
-  s = symtab = (symbol **) xnmalloc (hash_table_size, sizeof (symbol *));
-
-  for (i = 0; i < hash_table_size; i++)
-    s[i] = NULL;
+  symbol **s = xicalloc (hash_table_size, sizeof *s);
+  symtab = s;
 
 #ifdef DEBUG_SYM
   {
@@ -124,20 +117,16 @@ symtab_init (void)
 #endif /* DEBUG_SYM */
 }
 
-/*--------------------------------------------------.
-| Return a hashvalue for a string, from GNU-emacs.  |
-`--------------------------------------------------*/
+/*----------------------------------.
+| Return a hashvalue for a string.  |
+`----------------------------------*/
 
 static size_t ATTRIBUTE_PURE
 hash (const char *s)
 {
-  register size_t val = 0;
-
-  register const char *ptr = s;
-  register char ch;
-
-  while ((ch = *ptr++) != '\0')
-    val = (val << 7) + (val >> (sizeof (val) * CHAR_BIT - 7)) + ch;
+  size_t val = 0;
+  for (; *s; s++)
+    ckd_add (&val, stdc_rotate_left (val, 7), +*s);
   return val;
 }
 
@@ -153,8 +142,8 @@ free_symbol (symbol *sym)
       SYMBOL_DELETED (sym) = true;
       if (SYMBOL_STACK (sym))
         {
-          SYMBOL_NAME (sym) = xmemdup0 (SYMBOL_NAME (sym),
-                                        SYMBOL_NAME_LEN (sym));
+          SYMBOL_NAME (sym) = ximemdup0 (SYMBOL_NAME (sym),
+                                         SYMBOL_NAME_LEN (sym));
           SYMBOL_STACK (sym) = NULL;
         }
     }
@@ -182,7 +171,7 @@ free_symbol (symbol *sym)
 `-------------------------------------------------------------------*/
 
 symbol *
-lookup_symbol (const char *name, int len, symbol_lookup mode)
+lookup_symbol (const char *name, idx_t len, symbol_lookup mode)
 {
   size_t h;
   int cmp = 1;
@@ -244,7 +233,7 @@ lookup_symbol (const char *name, int len, symbol_lookup mode)
               profiles[mode].allocations++;
 #endif
               sym = (symbol *) xmalloc (sizeof (symbol));
-              SYMBOL_TYPE (sym) = TOKEN_VOID;
+              set_token_data_void (symbol_token_data (sym));
               SYMBOL_TRACED (sym) = SYMBOL_TRACED (old);
               sym->hash = h;
               SYMBOL_NAME (sym) = SYMBOL_NAME (old);
@@ -273,7 +262,7 @@ lookup_symbol (const char *name, int len, symbol_lookup mode)
       profiles[mode].allocations++;
 #endif
       sym = (symbol *) xmalloc (sizeof (symbol));
-      SYMBOL_TYPE (sym) = TOKEN_VOID;
+      set_token_data_void (symbol_token_data (sym));
       SYMBOL_TRACED (sym) = false;
       sym->hash = h;
       SYMBOL_MACRO_ARGS (sym) = false;
@@ -296,7 +285,7 @@ lookup_symbol (const char *name, int len, symbol_lookup mode)
         }
       else
         {
-          SYMBOL_NAME (sym) = xmemdup0 (name, len);
+          SYMBOL_NAME (sym) = ximemdup0 (name, len);
           SYMBOL_NAME_LEN (sym) = len;
         }
       return sym;
@@ -342,10 +331,10 @@ lookup_symbol (const char *name, int len, symbol_lookup mode)
             profiles[mode].allocations++;
 #endif
             sym = (symbol *) xmalloc (sizeof (symbol));
-            SYMBOL_TYPE (sym) = TOKEN_VOID;
+            set_token_data_void (symbol_token_data (sym));
             SYMBOL_TRACED (sym) = true;
             sym->hash = h;
-            SYMBOL_NAME (sym) = xmemdup0 (name, len);
+            SYMBOL_NAME (sym) = ximemdup0 (name, len);
             SYMBOL_NAME_LEN (sym) = len;
             SYMBOL_MACRO_ARGS (sym) = false;
             SYMBOL_BLIND_NO_ARGS (sym) = false;
@@ -381,16 +370,13 @@ lookup_symbol (const char *name, int len, symbol_lookup mode)
 void
 hack_all_symbols (hack_symbol *func, void *data)
 {
-  size_t h;
-  symbol *sym;
-  symbol *next;
-
-  for (h = 0; h < hash_table_size; h++)
+  for (idx_t h = 0; h < hash_table_size; h++)
     {
       /* We allow func to call SYMBOL_POPDEF, which can invalidate
          sym, so we must grab the next element to traverse before
          calling func.  */
-      for (sym = symtab[h]; sym != NULL; sym = next)
+      symbol *next;
+      for (symbol *sym = symtab[h]; sym != NULL; sym = next)
         {
           next = sym->next;
           func (sym, data);
@@ -400,7 +386,7 @@ hack_all_symbols (hack_symbol *func, void *data)
 
 #ifdef DEBUG_SYM
 
-static void symtab_print_list (int i);
+static void symtab_print_list (intmax_t i);
 
 static void MAYBE_UNUSED
 symtab_debug (void)
@@ -408,49 +394,44 @@ symtab_debug (void)
   token_data td;
   const char *text;
   symbol *s;
-  int delete;
-  static int i;
-  int len;
+  static intmax_t i;
+  idx_t len;
 
   while (next_token (&td, NULL) == TOKEN_WORD)
     {
+      enum symbol_lookup mode;
       text = TOKEN_DATA_TEXT (&td);
       len = TOKEN_DATA_LEN (&td);
       if (*text == '_')
         {
-          delete = 1;
+          mode = SYMBOL_DELETE;
           text++;
           len--;
         }
       else
-        delete = 0;
+        mode = SYMBOL_INSERT;
 
       s = lookup_symbol (text, len, SYMBOL_LOOKUP);
 
       if (s == NULL)
-        xprintf ("Name `%s' is unknown\n", text);
+        xprintf ("Name %s is unknown\n", squote (text));
 
-      lookup_symbol (text, len, delete ? SYMBOL_DELETE : SYMBOL_INSERT);
+      lookup_symbol (text, len, mode);
     }
   symtab_print_list (i++);
 }
 
 static void
-symtab_print_list (int i)
+symtab_print_list (intmax_t i)
 {
-  symbol *sym;
-  symbol *bucket;
-  size_t h;
-
-  xprintf ("Symbol dump #%d:\n", i);
-  for (h = 0; h < hash_table_size; h++)
-    for (bucket = symtab[h]; bucket != NULL; bucket = bucket->next)
-      for (sym = bucket; sym; sym = sym->stack)
-        xprintf ("\tname %s, len %i, hash %lu, bucket %lu, addr %p, "
-                 "stack %p, next %p, flags%s%s, pending %d\n",
+  xprintf ("Symbol dump #%jd:\n", i);
+  for (idx_t h = 0; h < hash_table_size; h++)
+    for (symbol *bucket = symtab[h]; bucket != NULL; bucket = bucket->next)
+      for (symbol *sym = bucket; sym; sym = sym->stack)
+        xprintf ("\tname %s, len %td, hash %zu, bucket %td, addr %p, "
+                 "stack %p, next %p, flags%s%s, pending %jd\n",
                  SYMBOL_NAME (sym), SYMBOL_NAME_LEN (sym),
-                 (unsigned long int) sym->hash,
-                 (unsigned long int) h, sym, SYMBOL_STACK (sym),
+                 sym->hash, h, sym, SYMBOL_STACK (sym),
                  sym->next,
                  SYMBOL_TRACED (sym) ? " traced" : "",
                  SYMBOL_DELETED (sym) ? " deleted" : "",

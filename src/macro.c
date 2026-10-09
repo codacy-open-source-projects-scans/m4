@@ -25,13 +25,13 @@
 #include "m4.h"
 
 static void expand_macro (symbol *);
-static void expand_token (struct obstack *, token_type, token_data *, int);
+static void expand_token (struct obstack *, token_type, token_data *, ival);
 
 /* Current recursion level in expand_macro ().  */
-int expansion_level = 0;
+intmax_t expansion_level = 0;
 
 /* The number of the current call of expand_macro ().  */
-static int macro_call_id = 0;
+static intmax_t macro_call_id = 0;
 
 /* The shared stack of collected arguments for macro calls; as each
    argument is collected, it is finished and its location stored in
@@ -59,7 +59,7 @@ expand_input (void)
 {
   token_type t;
   token_data td;
-  int line;
+  ival line;
 
   obstack_init (&argc_stack);
   obstack_init (&argv_stack);
@@ -80,7 +80,7 @@ expand_input (void)
 `----------------------------------------------------------------*/
 
 static void
-expand_token (struct obstack *obs, token_type t, token_data *td, int line)
+expand_token (struct obstack *obs, token_type t, token_data *td, ival line)
 {
   symbol *sym;
 
@@ -142,12 +142,12 @@ expand_argument (struct obstack *obs, token_data *argp, bool groks_macro)
   token_type t;
   token_data td;
   char *text;
-  int paren_level;
+  idx_t paren_level;
   const char *file = current_file;
-  int line = current_line;
-  size_t len;
+  ival line = current_line;
+  idx_t len;
 
-  TOKEN_DATA_TYPE (argp) = TOKEN_VOID;
+  set_token_data_void (argp);
 
   /* Skip leading white space.  */
   do
@@ -176,14 +176,10 @@ expand_argument (struct obstack *obs, token_data *argp, bool groks_macro)
                 {
                   M4ERROR ((warning_status, 0,
                             _("Warning: cannot concatenate builtin tokens")));
-                  TOKEN_DATA_TYPE (argp) = TOKEN_VOID;
+                  set_token_data_void (argp);
                 }
               if (TOKEN_DATA_TYPE (argp) == TOKEN_VOID)
-                {
-                  TOKEN_DATA_TYPE (argp) = TOKEN_TEXT;
-                  TOKEN_DATA_TEXT (argp) = text;
-                  TOKEN_DATA_LEN (argp) = len;
-                }
+                set_token_data_text (argp, text, len);
               return t == TOKEN_COMMA;
             }
           FALLTHROUGH;
@@ -215,15 +211,12 @@ expand_argument (struct obstack *obs, token_data *argp, bool groks_macro)
             {
               if (obstack_object_size (obs) == 0 &&
                   TOKEN_DATA_TYPE (argp) == TOKEN_VOID)
-                {
-                  TOKEN_DATA_TYPE (argp) = TOKEN_FUNC;
-                  TOKEN_DATA_FUNC (argp) = TOKEN_DATA_FUNC (&td);
-                }
+                set_token_data_func (argp, TOKEN_DATA_FUNC (&td));
               else
                 {
                   M4ERROR ((warning_status, 0,
                             _("Warning: cannot concatenate builtin tokens")));
-                  TOKEN_DATA_TYPE (argp) = TOKEN_VOID;
+                  set_token_data_void (argp);
                 }
             }
           break;
@@ -253,9 +246,7 @@ collect_arguments (symbol *sym, struct obstack *argptr,
   bool more_args;
   bool groks_macro = SYMBOL_MACRO_ARGS (sym);
 
-  TOKEN_DATA_TYPE (&td) = TOKEN_TEXT;
-  TOKEN_DATA_TEXT (&td) = SYMBOL_NAME (sym);
-  TOKEN_DATA_LEN (&td) = SYMBOL_NAME_LEN (sym);
+  set_token_data_text (&td, SYMBOL_NAME (sym), SYMBOL_NAME_LEN (sym));
   tdp = (token_data *) obstack_copy (arguments, &td, sizeof td);
   obstack_ptr_grow (argptr, tdp);
 
@@ -284,7 +275,7 @@ collect_arguments (symbol *sym, struct obstack *argptr,
 `-------------------------------------------------------------------*/
 
 void
-call_macro (symbol *sym, int argc, token_data **argv,
+call_macro (symbol *sym, idx_t argc, token_data **argv,
             struct obstack *expansion)
 {
   switch (SYMBOL_TYPE (sym))
@@ -321,14 +312,14 @@ static void
 expand_macro (symbol *sym)
 {
   struct obstack arguments;     /* Alternate obstack if argc_stack is busy.  */
-  unsigned argv_base;           /* Size of argv_stack on entry.  */
+  idx_t argv_base;              /* Size of argv_stack on entry.  */
   bool use_argc_stack = true;   /* Whether argc_stack is safe.  */
   token_data **argv;
-  int argc;
+  idx_t argc;
   struct obstack *expansion;
   const char *expanded;
   bool traced;
-  int my_call_id;
+  intmax_t my_call_id;
 
   /* Report errors at the location where the open parenthesis (if any)
      was found, but after expansion, restore global state back to the
@@ -337,16 +328,16 @@ expand_macro (symbol *sym)
      current_file/current_line (dnl, include, and sinclude are special
      cased in the input engine to ensure this fact).  */
   const char *loc_open_file = current_file;
-  int loc_open_line = current_line;
+  ival loc_open_line = current_line;
   const char *loc_close_file;
-  int loc_close_line;
+  ival loc_close_line;
 
   SYMBOL_PENDING_EXPANSIONS (sym)++;
-  expansion_level++;
-  if (nesting_limit > 0 && expansion_level > nesting_limit)
+  if (nesting_limit <= expansion_level)
     m4_failure (0,
-                _("recursion limit of %d exceeded, use -L<N> to change it"),
+                _("recursion limit of %jd exceeded, use -L<N> to change it"),
                 nesting_limit);
+  expansion_level++;
 
   macro_call_id++;
   my_call_id = macro_call_id;
@@ -369,9 +360,14 @@ expand_macro (symbol *sym)
   collect_arguments (sym, &argv_stack,
                      use_argc_stack ? &argc_stack : &arguments);
 
+  #ifdef UINTPTR_MAX
+  typedef uintptr_t uptrchar; /* Pacify gcc -Wcast-align.  */
+  #else
+  typedef char *uptrchar;
+  #endif
   argc = ((obstack_object_size (&argv_stack) - argv_base)
           / sizeof (token_data *));
-  argv = (token_data **) ((uintptr_t) obstack_base (&argv_stack) + argv_base);
+  argv = (token_data **) ((uptrchar) obstack_base (&argv_stack) + argv_base);
 
   loc_close_file = current_file;
   loc_close_line = current_line;

@@ -29,10 +29,10 @@
 #include <c-ctype.h>
 #include <errno.h>
 #include <error.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <locale.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -46,6 +46,7 @@
 #include "dirname.h"
 #include "exitfail.h"
 #include "filenamecat.h"
+#include "idx.h"
 #include "intprops.h"
 #include "obstack.h"
 #include "stdio--.h"
@@ -93,13 +94,19 @@
 #endif
 
 #define _(msgid) gettext (msgid)
+#define N_(msgid) msgid
+
+_GL_INLINE_HEADER_BEGIN
+#ifndef M4_INLINE
+# define M4_INLINE _GL_INLINE
+#endif
 
 /* Various declarations.  */
 
 struct string
 {
   char *string;                 /* characters of the string */
-  size_t length;                /* length of the string */
+  idx_t length;                 /* length of the string */
 };
 typedef struct string STRING;
 
@@ -109,7 +116,7 @@ typedef struct string STRING;
 
 /* Those must come first.  */
 typedef struct token_data token_data;
-typedef void builtin_func (struct obstack *, int, token_data **);
+typedef void builtin_func (struct obstack *, idx_t, token_data **);
 
 /* Gnulib's stdbool doesn't work with bool bitfields.  For nicer
    debugging, use bool when we know it works, but use the more
@@ -123,15 +130,15 @@ typedef unsigned int bool_bitfield;
 /* File: m4.c  --- global definitions.  */
 
 /* Option flags.  */
-extern int sync_output;         /* -s */
+extern bool sync_output;        /* -s */
 extern int debug_level;         /* -d */
-extern size_t hash_table_size;  /* -H */
-extern int no_gnu_extensions;   /* -G */
-extern int prefix_all_builtins; /* -P */
-extern int max_debug_argument_length;   /* -l */
-extern int suppress_warnings;   /* -Q */
+extern idx_t hash_table_size;   /* -H */
+extern bool no_gnu_extensions;  /* -G */
+extern bool prefix_all_builtins;/* -P */
+extern idx_t max_debug_argument_length;   /* -l */
+extern bool suppress_warnings;  /* -Q */
 extern int warning_status;      /* -E */
-extern int nesting_limit;       /* -L */
+extern intmax_t nesting_limit;  /* -L */
 #ifdef ENABLE_CHANGEWORD
 extern const char *user_word_regexp;    /* -W */
 #endif
@@ -139,17 +146,53 @@ extern const char *user_word_regexp;    /* -W */
 /* Error handling.  */
 extern int retcode;
 
+/* Integers for 'eval', and their maximum value, width, and formatters.
+   Builders can compile with -DIVAL_32_BIT for traditional 32-bit behavior
+   and wraparound arithmetic without overflow checking,
+   even when 32 < INT_WIDTH.  This is a temporary measure so that we
+   can test it both ways; the intent is drop support for IVAL_32_BIT.  */
+#ifndef IVAL_32_BIT
+# define IVAL_32_BIT 0
+#endif
+#if IVAL_32_BIT
+typedef int ival;
+# define IVAL_MAX INT_MAX
+# define IVAL_MIN INT_MIN
+# define IVAL_WIDTH INT_WIDTH
+# define ivaltostr inttostr
+# define PRIdIVAL "d"
+typedef unsigned int uival;
+static_assert (INT_WIDTH == UINT_WIDTH);
+typedef long int iival;
+# define strtoiival strtol
+#else
+typedef intmax_t ival;
+# define IVAL_MAX INTMAX_MAX
+# define IVAL_MIN INTMAX_MIN
+# define IVAL_WIDTH INTMAX_WIDTH
+# define ivaltostr imaxtostr
+# define PRIdIVAL PRIdMAX
+typedef uintmax_t uival;
+static_assert (INTMAX_WIDTH == UINTMAX_WIDTH);
+typedef intmax_t iival;
+# define strtoiival strtoimax
+#endif
 
 /* *INDENT-OFF* */
 extern void m4_error (int, int, const char *, ...)
   ATTRIBUTE_COLD ATTRIBUTE_FORMAT ((__printf__, 3, 4));
-extern void m4_error_at_line (int, int, const char *, int, const char *, ...)
+extern void m4_error_at_line (int, int, const char *, ival, const char *, ...)
   ATTRIBUTE_COLD ATTRIBUTE_FORMAT ((__printf__, 5, 6));
 extern _Noreturn void m4_failure (int, const char *, ...)
   ATTRIBUTE_FORMAT ((__printf__, 2, 3));
-extern _Noreturn void m4_failure_at_line (int, const char *, int,
+extern _Noreturn void m4_failure_at_line (int, const char *, ival,
                                           const char *, ...)
   ATTRIBUTE_FORMAT ((__printf__, 4, 5));
+extern char *cquote (char const *);
+extern char *sh_quote (char const *);
+extern char *sh_quote_n (int, char const *);
+extern char *squote (char const *);
+extern char *squote_n (int, char const *);
 /* *INDENT-ON* */
 
 #define M4ERROR(Arglist) (m4_error Arglist)
@@ -246,9 +289,9 @@ extern void debug_flush_files (void);
 extern bool debug_set_output (const char *);
 extern void debug_message_prefix (void);
 
-extern void trace_prepre (const char *, int);
-extern void trace_pre (const char *, int, int, token_data **);
-extern void trace_post (const char *, int, int, const char *);
+extern void trace_prepre (const char *, intmax_t);
+extern void trace_pre (const char *, intmax_t, idx_t, token_data **);
+extern void trace_post (const char *, intmax_t, idx_t, const char *);
 
 /* File: input.c  --- lexical definitions.  */
 
@@ -265,24 +308,25 @@ enum token_type
   TOKEN_MACDEF                  /* a macro's definition (see "defn") */
 };
 
-/* The data for a token, a macro argument, and a macro definition.  */
+/* The data for a macro argument, a token, and a macro definition.
+   Only macro arguments have associated text.  */
 enum token_data_type
 {
-  TOKEN_VOID,
-  TOKEN_TEXT,
-  TOKEN_FUNC
+  TOKEN_TEXT = 0,
+  TOKEN_VOID = -1,
+  TOKEN_FUNC = -2,
 };
 
 struct token_data
 {
-  enum token_data_type type;
-  /* Several places in the code only work with tokens no larger than
-     2G.  Although len only matters for a text token, putting it here
-     instead of in the union allows struct token_data to be
-     smaller.  */
-  int len;
+  /* If nonnegative, this is the macro argument's length.
+     Otherwise, this is a negative enum token_data_type value.
+     Doing it this way makes struct token_data smaller.  */
+  ptrdiff_t len;
+
   union
   {
+    /* A macro argument's text.  */
     struct
     {
       char *text;
@@ -291,29 +335,80 @@ struct token_data
 #endif
     }
     u_t;
+
+    /* A macro definition.  */
     builtin_func *func;
+
+    /* Tokens use no members of this union.  */
   }
   u;
 };
 
-#define TOKEN_DATA_TYPE(Td)             ((Td)->type)
-#define TOKEN_DATA_LEN(Td)              ((Td)->len)
-#define TOKEN_DATA_TEXT(Td)             ((Td)->u.u_t.text)
+M4_INLINE void
+set_token_data_text (struct token_data *td, char *text, idx_t len)
+{
+  td->len = len;
+  td->u.u_t.text = text;
+}
+M4_INLINE void
+set_token_data_void (struct token_data *td)
+{
+  td->len = TOKEN_VOID;
+}
+M4_INLINE void
+set_token_data_func (struct token_data *td, builtin_func *func)
+{
+  td->len = TOKEN_FUNC;
+  td->u.func = func;
+}
+M4_INLINE enum token_data_type
+TOKEN_DATA_TYPE (struct token_data const *td)
+{
+  if (td->len < 0)
+    {
+      assume (TOKEN_FUNC <= td->len);
+      return td->len;
+    }
+  return TOKEN_TEXT;
+}
+M4_INLINE idx_t
+TOKEN_DATA_LEN (struct token_data const *td)
+{
+  return td->len;
+}
+M4_INLINE char *
+TOKEN_DATA_TEXT (struct token_data const *td)
+{
+  return td->u.u_t.text;
+}
 #ifdef ENABLE_CHANGEWORD
-# define TOKEN_DATA_ORIG_TEXT(Td)       ((Td)->u.u_t.original_text)
+M4_INLINE char *
+TOKEN_DATA_ORIG_TEXT (struct token_data const *td)
+{
+  return td->u.u_t.original_text;
+}
+M4_INLINE void
+set_token_data_orig_text (struct token_data *td, char *original_text)
+{
+  td->u.u_t.original_text = original_text;
+}
 #endif
-#define TOKEN_DATA_FUNC(Td)             ((Td)->u.func)
+M4_INLINE builtin_func *
+TOKEN_DATA_FUNC (struct token_data const *td)
+{
+  return td->u.func;
+}
 
 typedef enum token_type token_type;
 typedef enum token_data_type token_data_type;
 
 extern void input_init (void);
 extern token_type peek_token (void);
-extern token_type next_token (token_data *, int *);
+extern token_type next_token (token_data *, ival *);
 extern void skip_line (void);
 
 /* push back input */
-extern void push_file (FILE *, const char *, bool);
+extern void push_file (FILE *, const char *);
 extern void push_macro (builtin_func *);
 extern struct obstack *push_string_init (void);
 extern const char *push_string_finish (void);
@@ -322,7 +417,7 @@ extern bool pop_wrapup (void);
 
 /* current input file, and line */
 extern const char *current_file;
-extern int current_line;
+extern ival current_line;
 
 /* left and right quote, begin and end comment */
 extern STRING bcomm;
@@ -342,15 +437,15 @@ extern void set_word_regexp (const char *);
 #endif
 
 /* File: output.c --- output functions.  */
-extern int current_diversion;
-extern int output_current_line;
+extern ival current_diversion;
+extern ival output_current_line;
 
 extern void output_init (void);
 extern void output_exit (void);
-extern void output_text (const char *, int);
-extern void shipout_text (struct obstack *, const char *, int, int);
-extern void make_diversion (int);
-extern void insert_diversion (int);
+extern void output_text (const char *, idx_t);
+extern void shipout_text (struct obstack *, const char *, idx_t, ival);
+extern void make_diversion (ival);
+extern void insert_diversion (ival);
 extern void insert_file (FILE *);
 extern void freeze_diversions (FILE *);
 
@@ -375,11 +470,11 @@ struct symbol
   bool_bitfield macro_args:1;
   bool_bitfield blind_no_args:1;
   bool_bitfield deleted:1;
-  int pending_expansions;
+  intmax_t pending_expansions;
 
   size_t hash;
   char *name;
-  int namelen;
+  idx_t namelen;
   token_data data;
 };
 
@@ -395,6 +490,11 @@ struct symbol
 #define SYMBOL_TEXT(S)          (TOKEN_DATA_TEXT (&(S)->data))
 #define SYMBOL_TEXT_LEN(S)      (TOKEN_DATA_LEN (&(S)->data))
 #define SYMBOL_FUNC(S)          (TOKEN_DATA_FUNC (&(S)->data))
+M4_INLINE struct token_data *
+symbol_token_data (struct symbol *s)
+{
+  return &s->data;
+}
 
 typedef enum symbol_lookup symbol_lookup;
 typedef struct symbol symbol;
@@ -404,15 +504,15 @@ typedef void hack_symbol (symbol *, void *);
 
 extern void free_symbol (symbol * sym);
 extern void symtab_init (void);
-extern symbol *lookup_symbol (const char *, int, symbol_lookup);
+extern symbol *lookup_symbol (const char *, idx_t, symbol_lookup);
 extern void hack_all_symbols (hack_symbol *, void *);
 
 /* File: macro.c  --- macro expansion.  */
 
-extern int expansion_level;
+extern intmax_t expansion_level;
 
 extern void expand_input (void);
-extern void call_macro (symbol *, int, token_data **, struct obstack *);
+extern void call_macro (symbol *, idx_t, token_data **, struct obstack *);
 
 /* File: builtin.c  --- builtins.  */
 
@@ -446,20 +546,19 @@ extern void builtin_init (void);
 extern void define_builtin (const char *, const builtin *, symbol_lookup);
 extern void set_macro_sequence (const char *);
 extern void free_macro_sequence (void);
-extern void define_user_macro (const char *, int, const char *, size_t,
+extern void define_user_macro (const char *, idx_t, const char *, idx_t,
                                symbol_lookup);
 extern void undivert_all (void);
-extern void expand_user_macro (struct obstack *, symbol *, int,
+extern void expand_user_macro (struct obstack *, symbol *, idx_t,
                                token_data **);
 
 /* *INDENT-OFF* */
-extern void m4_placeholder (struct obstack *, int, token_data **)
+extern void m4_placeholder (struct obstack *, idx_t, token_data **)
   ATTRIBUTE_COLD;
 /* *INDENT-ON* */
 
 extern void init_pattern_buffer (struct re_pattern_buffer *,
                                  struct re_registers *);
-extern const char *ntoa (int32_t, int, const char **);
 
 extern const builtin *find_builtin_by_addr (builtin_func *);
 extern const builtin *find_builtin_by_name (const char *);
@@ -473,11 +572,11 @@ extern FILE *m4_path_search (const char *, bool, char **);
 
 /* File: eval.c  --- expression evaluation.  */
 
-extern bool evaluate (const char *, int32_t *);
+extern bool evaluate (const char *, ival *);
 
 /* File: format.c  --- printf like formatting.  */
 
-extern void expand_format (struct obstack *, int, token_data **);
+extern void expand_format (struct obstack *, idx_t, token_data **);
 
 /* File: freeze.c --- frozen state files.  */
 
@@ -505,15 +604,28 @@ extern void reload_frozen_state (const char *);
 /* Convert a possibly-signed character to an unsigned character.  This is
    a bit safer than casting to unsigned char, since it catches some type
    errors that the cast doesn't.  */
-#if HAVE_INLINE
-static inline unsigned char
+M4_INLINE unsigned char
 to_uchar (char ch)
 {
   return ch;
 }
-#else
-# define to_uchar(C) ((unsigned char) (C))
-#endif
 
-/* Avoid negative logic when comparing two strings.  */
-#define STREQ(a, b) (strcmp (a, b) == 0)
+/* Normalize VAL.  Typically calls are optimized away.  */
+M4_INLINE ival
+toival (ival val)
+{
+#if IVAL_32_BIT && INT_MAX < IVAL_MAX
+  /* On this oddball platform, silently convert VAL to its sign bit
+     and low order 31 value bits.
+     int32_max holds the low-order 31 bits of a nonnegative m4 integer,
+     and equals INT32_MAX in the usual case where INT32_MAX is defined.  */
+  enum { int32_max = 0x7fffffff };
+  return (0 <= val ? val & int32_max
+          : INT_MIN < -INT_MAX ? val | (-1 - int32_max)
+          : -(-val & int32_max));
+#else
+  return val;
+#endif
+}
+
+_GL_INLINE_HEADER_END

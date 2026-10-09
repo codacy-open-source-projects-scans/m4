@@ -28,14 +28,12 @@ struct includes
 {
   struct includes *next;        /* next directory to search */
   const char *dir;              /* directory */
-  int len;
 };
 
 typedef struct includes includes;
 
 static includes *dir_list;      /* the list of path directories */
 static includes *dir_list_end;  /* the end of same */
-static int dir_max_length;      /* length of longest directory name */
 
 
 void
@@ -43,7 +41,6 @@ include_init (void)
 {
   dir_list = NULL;
   dir_list_end = NULL;
-  dir_max_length = 0;
 }
 
 void
@@ -88,11 +85,7 @@ add_include_directory (const char *dir)
 
   incl = (includes *) xmalloc (sizeof (struct includes));
   incl->next = NULL;
-  incl->len = strlen (dir);
   incl->dir = xstrdup (dir);
-
-  if (incl->len > dir_max_length)       /* remember len of longest directory */
-    dir_max_length = incl->len;
 
   if (dir_list_end == NULL)
     dir_list = incl;
@@ -176,7 +169,8 @@ m4_path_search (const char *file, bool binary, char **result)
       if (fp != NULL)
         {
           if (debug_level & DEBUG_TRACE_PATH)
-            DEBUG_MESSAGE2 ("path search for `%s' found `%s'", file, name);
+            DEBUG_MESSAGE2 ("path search for %s found %s",
+                            sh_quote_n (0, file), sh_quote_n (1, name));
           if (result)
             *result = name;
           else

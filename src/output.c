@@ -22,10 +22,13 @@
 #include "m4.h"
 
 #include <limits.h>
+#include <stdckdint.h>
 #include <sys/stat.h>
 
 #include "gl_avltree_oset.h"
 #include "gl_xoset.h"
+#include "inttostr.h"
+#include "minmax.h"
 
 /* Work around a bogus GCC warning
    <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=116426>.  */
@@ -37,9 +40,11 @@
    would usually fit in.  */
 #define INITIAL_BUFFER_SIZE 512
 
-/* Maximum value for the total of all in-memory buffer sizes for
-   diversions.  */
-#define MAXIMUM_TOTAL_SIZE (512 * 1024)
+/* Soft limit for the total of all in-memory buffer sizes for diversions.
+   When about to exceed the limit, go on a diet by flushing the single
+   largest buffer.  This may not suffice, which is why it is a soft
+   limit not a hard one.  */
+enum { BIG_TOTAL_SIZE = 512 * 1024 };
 
 /* Size of buffer size to use while copying files.  */
 #define COPY_BUFFER_SIZE (32 * 512)
@@ -69,9 +74,9 @@ struct m4_diversion
     char *buffer;               /* Malloc'd diversion buffer.  */
     m4_diversion *next;         /* Free-list pointer */
   } u;
-  int divnum;                   /* Which diversion this represents.  */
-  int size;                     /* Usable size before reallocation.  */
-  int used;                     /* Used buffer length, or tmp file exists.  */
+  ival divnum;                  /* Which diversion this represents.  */
+  idx_t size;                   /* Usable size before reallocation.  */
+  idx_t used;                   /* Used buffer length, or tmp file exists.  */
 };
 
 /* Table of diversions 1 through INT_MAX.  */
@@ -87,11 +92,11 @@ static m4_diversion *free_list;
 static struct obstack diversion_storage;
 
 /* Total size of all in-memory buffer sizes.  */
-static int total_buffer_size;
+static intmax_t total_buffer_size;
 
 /* The number of the currently active diversion.  This variable is
    maintained for the `divnum' builtin function.  */
-int current_diversion;
+ival current_diversion;
 
 /* Current output diversion, NULL if output is being currently
    discarded.  output_diversion->u is guaranteed non-NULL except when
@@ -111,10 +116,10 @@ static char *output_cursor;
 
 /* Cache of output_diversion->size - output_diversion->used, only
    valid when output_diversion->size is non-zero.  */
-static int output_unused;
+static idx_t output_unused;
 
 /* Number of input line we are generating output for.  */
-int output_current_line;
+ival output_current_line;
 
 /* Temporary directory holding all spilled diversion files.  */
 static m4_temp_dir *output_temp_dir;
@@ -124,8 +129,8 @@ static FILE *tmp_file1;
 static FILE *tmp_file2;
 
 /* Diversions that own tmp_file, or 0.  */
-static int tmp_file1_owner;
-static int tmp_file2_owner;
+static ival tmp_file1_owner;
+static ival tmp_file2_owner;
 
 /* True if tmp_file2 is more recently used.  */
 static bool tmp_file2_recent;
@@ -140,6 +145,8 @@ cmp_diversion_CB (const void *elt1, const void *elt2)
 {
   const m4_diversion *d1 = (const m4_diversion *) elt1;
   const m4_diversion *d2 = (const m4_diversion *) elt2;
+  if (INT_MAX < IVAL_MAX)
+    return _GL_CMP (d1->divnum, d2->divnum);
   /* No need to worry about overflow, since we don't create diversions
      with negative divnum.  */
   return d1->divnum - d2->divnum;
@@ -149,10 +156,9 @@ cmp_diversion_CB (const void *elt1, const void *elt2)
 static bool
 threshold_diversion_CB (const void *elt, const void *threshold)
 {
-  const m4_diversion *diversion = (const m4_diversion *) elt;
-  /* No need to worry about overflow, since we don't create diversions
-     with negative divnum.  */
-  return diversion->divnum >= *(const int *) threshold;
+  m4_diversion const *diversion = elt;
+  ival const *thresh = threshold;
+  return *thresh <= diversion->divnum;
 }
 
 /* Clean up any temporary directory.  Designed for use as an atexit
@@ -191,22 +197,23 @@ cleanup_tmpfile (void)
 
 /* Convert DIVNUM into a temporary file name for use in m4_tmp*.  */
 static const char *
-m4_tmpname (int divnum)
+m4_tmpname (ival divnum)
 {
   static char *buffer;
   static char *tail;
   if (buffer == NULL)
     {
-      size_t dirlen = strlen (output_temp_dir->dir_name);
+      idx_t dirlen = strlen (output_temp_dir->dir_name);
       static char const subprefix[] = "/m4-";
-      size_t size = dirlen + sizeof subprefix + INT_STRLEN_BOUND (int);
+      idx_t size = dirlen + sizeof subprefix + INT_STRLEN_BOUND (ival);
       buffer = obstack_alloc (&diversion_storage, size);
-      memcpy (buffer, output_temp_dir->dir_name, dirlen);
-      memcpy (buffer + dirlen, subprefix, sizeof subprefix - 1);
-      tail = buffer + dirlen + sizeof subprefix - 1;
+      tail = mempcpy (mempcpy (buffer, output_temp_dir->dir_name, dirlen),
+                      subprefix, sizeof subprefix - 1);
     }
   assert (0 < divnum);
-  sprintf (tail, "%d", divnum);
+  char *t = tail;
+  for (char *p = ivaltostr (divnum, t); (*t++ = *p++); )
+    continue;
   return buffer;
 }
 
@@ -218,7 +225,7 @@ m4_tmpname (int divnum)
    m4_tmpremove.  Exits on failure, so the return value is always an
    open file.  */
 static FILE *
-m4_tmpfile (int divnum)
+m4_tmpfile (ival divnum)
 {
   const char *name;
   FILE *file;
@@ -247,7 +254,7 @@ m4_tmpfile (int divnum)
    end.  Exits on failure, so the return value is always an open
    file.  */
 static FILE *
-m4_tmpopen (int divnum, bool reread)
+m4_tmpopen (ival divnum, bool reread)
 {
   const char *name;
   FILE *file;
@@ -284,7 +291,7 @@ m4_tmpopen (int divnum, bool reread)
    On the other hand, keeping every spilled diversion open would run
    into EMFILE limits.  */
 static int
-m4_tmpclose (FILE *file, int divnum)
+m4_tmpclose (FILE *file, ival divnum)
 {
   int result = 0;
   if (divnum != tmp_file1_owner && divnum != tmp_file2_owner)
@@ -309,7 +316,7 @@ m4_tmpclose (FILE *file, int divnum)
 
 /* Delete a closed temporary FILE for diversion DIVNUM.  */
 static int
-m4_tmpremove (int divnum)
+m4_tmpremove (ival divnum)
 {
   if (divnum == tmp_file1_owner)
     {
@@ -332,7 +339,7 @@ m4_tmpremove (int divnum)
    unused diversion NEWNUM.  Return an open stream visiting the new
    temporary file, positioned at the end, or exit on failure.  */
 static FILE *
-m4_tmprename (int oldnum, int newnum)
+m4_tmprename (ival oldnum, ival newnum)
 {
   /* m4_tmpname reuses its return buffer.  */
   char *oldname = xstrdup (m4_tmpname (oldnum));
@@ -407,39 +414,36 @@ output_exit (void)
 /*----------------------------------------------------------------.
 | Reorganize in-memory diversion buffers so the current diversion |
 | can accommodate LENGTH more characters without further          |
-| reorganization.  The current diversion buffer is made bigger if |
-| possible.  But to make room for a bigger buffer, one of the     |
-| in-memory diversion buffers might have to be flushed to a newly |
+| reorganization, where LENGTH is so large that the characters    |
+| don't fit now.  The current diversion buffer is made bigger if  |
+| possible.  But to try to make room for a bigger buffer, an      |
+| in-memory diversion buffer might have to be flushed to a newly  |
 | created temporary file.  This flushed buffer might well be the  |
 | current one.                                                    |
 `----------------------------------------------------------------*/
 
 static void
-make_room_for (int length)
+make_room_for (idx_t length)
 {
-  int wanted_size;
   m4_diversion *selected_diversion = NULL;
 
   /* Compute needed size for in-memory buffer.  Diversions in-memory
-     buffers start at 0 bytes, then 512, then keep doubling until it is
+     buffers start at 0 bytes, then keep growing via xpalloc until it is
      decided to flush them to disk.  */
 
-  output_diversion->used = output_diversion->size - output_unused;
+  idx_t oldsize = output_diversion->size;
+  idx_t incr_min = MAX (length - output_unused,
+                        oldsize ? 0 : INITIAL_BUFFER_SIZE);
+  output_diversion->used = oldsize - output_unused;
 
-  for (wanted_size = output_diversion->size;
-       wanted_size < output_diversion->used + length;
-       wanted_size = wanted_size == 0 ? INITIAL_BUFFER_SIZE : wanted_size * 2)
-    ;
+  /* If the new total would exceed BIG_TOTAL_SIZE,
+     flush the largest buffer to try to make room.  */
 
-  /* Check if we are exceeding the maximum amount of buffer memory.  */
-
-  if (total_buffer_size - output_diversion->size + wanted_size
-      > MAXIMUM_TOTAL_SIZE)
+  if (BIG_TOTAL_SIZE - total_buffer_size < incr_min)
     {
-      int selected_used;
+      idx_t selected_used;
       char *selected_buffer;
       m4_diversion *diversion;
-      int count;
       gl_oset_iterator_t iter;
       const void *elt;
 
@@ -477,7 +481,8 @@ make_room_for (int length)
 
       if (selected_diversion->used > 0)
         {
-          count = fwrite (selected_buffer, (size_t) selected_diversion->used,
+          idx_t count;
+          count = fwrite (selected_buffer, selected_diversion->used,
                           1, selected_diversion->u.file);
           if (count != 1)
             m4_failure (errno,
@@ -513,14 +518,14 @@ make_room_for (int length)
         }
 
       /* The current buffer may be safely reallocated.  */
-      {
-        char *buffer = output_diversion->u.buffer;
-        output_diversion->u.buffer = xcharalloc ((size_t) wanted_size);
-        if (output_diversion->used)
-          memcpy (output_diversion->u.buffer, buffer, output_diversion->used);
-        free (buffer);
-      }
-
+      ptrdiff_t n_max = (ckd_add (&n_max, oldsize, incr_min)
+                         ? -1 /* Cause xpalloc to fail.  */
+                         : MAX (n_max,
+                                (BIG_TOTAL_SIZE - total_buffer_size
+                                 + output_diversion->size)));
+      idx_t wanted_size = oldsize;
+      output_diversion->u.buffer = xpalloc (output_diversion->u.buffer,
+                                            &wanted_size, incr_min, n_max, 1);
       total_buffer_size += wanted_size - output_diversion->size;
       output_diversion->size = wanted_size;
 
@@ -543,7 +548,7 @@ make_room_for (int length)
     (output_unused--, *output_cursor++ = (Char))
 
 static void
-output_character_helper (int character)
+output_character_helper (char character)
 {
   make_room_for (1);
 
@@ -562,10 +567,8 @@ output_character_helper (int character)
 `-------------------------------------------------------------------*/
 
 void
-output_text (const char *text, int length)
+output_text (const char *text, idx_t length)
 {
-  int count;
-
   if (!output_diversion || !length)
     return;
 
@@ -574,16 +577,15 @@ output_text (const char *text, int length)
 
   if (output_file)
     {
+      idx_t count;
       count = fwrite (text, length, 1, output_file);
       if (count != 1)
         m4_failure (errno, _("ERROR: copying inserted file"));
     }
   else
     {
-      assert (output_cursor);
-      memcpy (output_cursor, text, (size_t) length);
-      output_cursor += length;
       output_unused -= length;
+      output_cursor = mempcpy (output_cursor, text, length);
     }
 }
 
@@ -603,7 +605,7 @@ output_text (const char *text, int length)
 `--------------------------------------------------------------------*/
 
 void
-shipout_text (struct obstack *obs, const char *text, int length, int line)
+shipout_text (struct obstack *obs, const char *text, idx_t length, ival line)
 {
   static bool start_of_output_line = true;
   const char *cursor;
@@ -679,7 +681,9 @@ shipout_text (struct obstack *obs, const char *text, int length, int line)
           start_of_output_line = false;
           output_current_line++;
 #ifdef DEBUG_OUTPUT
-          xfprintf (stderr, "DEBUG: line %d, cur %d, cur out %d\n",
+          xfprintf (stderr,
+                    ("DEBUG: line %"PRIdIVAL", cur %"PRIdIVAL
+                     ", cur out %"PRIdIVAL"\n"),
                     line, current_line, output_current_line);
 #endif
 
@@ -689,13 +693,14 @@ shipout_text (struct obstack *obs, const char *text, int length, int line)
 
           if (output_current_line != line)
             {
+              char linebuf[INT_BUFSIZE_BOUND (ival)];
               OUTPUT_CHARACTER ('#');
               OUTPUT_CHARACTER ('l');
               OUTPUT_CHARACTER ('i');
               OUTPUT_CHARACTER ('n');
               OUTPUT_CHARACTER ('e');
               OUTPUT_CHARACTER (' ');
-              for (cursor = ntoa (line, 10, NULL); *cursor; cursor++)
+              for (cursor = ivaltostr (line, linebuf); *cursor; cursor++)
                 OUTPUT_CHARACTER (*cursor);
               if (output_current_line < 1 && current_file[0] != '\0')
                 {
@@ -718,7 +723,9 @@ shipout_text (struct obstack *obs, const char *text, int length, int line)
               start_of_output_line = false;
               output_current_line++;
 #ifdef DEBUG_OUTPUT
-              xfprintf (stderr, "DEBUG: line %d, cur %d, cur out %d\n",
+              xfprintf (stderr,
+                        ("DEBUG: line %"PRIdIVAL", cur %"PRIdIVAL
+                         ", cur out %"PRIdIVAL"\n"),
                         line, current_line, output_current_line);
 #endif
             }
@@ -740,7 +747,7 @@ shipout_text (struct obstack *obs, const char *text, int length, int line)
    available file descriptors (each overflowing diversion uses one).  */
 
 void
-make_diversion (int divnum)
+make_diversion (ival divnum)
 {
   m4_diversion *diversion = NULL;
 
@@ -837,7 +844,7 @@ void
 insert_file (FILE *file)
 {
   static char buffer[COPY_BUFFER_SIZE];
-  size_t length;
+  idx_t length;
 
   /* Optimize out inserting into a sink.  */
   if (!output_diversion)
@@ -949,7 +956,7 @@ insert_diversion_helper (m4_diversion *diversion)
 `------------------------------------------------------------------*/
 
 void
-insert_diversion (int divnum)
+insert_diversion (ival divnum)
 {
   const void *elt;
 
@@ -992,8 +999,8 @@ undivert_all (void)
 void
 freeze_diversions (FILE *file)
 {
-  int saved_number;
-  int last_inserted;
+  ival saved_number;
+  ival last_inserted;
   gl_oset_iterator_t iter;
   const void *elt;
 
@@ -1009,19 +1016,18 @@ freeze_diversions (FILE *file)
       if (diversion->size || diversion->used)
         {
           if (diversion->size)
-            xfprintf (file, "D%d,%d\n", diversion->divnum, diversion->used);
+            xfprintf (file, "D%"PRIdIVAL",%td\n",
+                      diversion->divnum, diversion->used);
           else
             {
               struct stat file_stat;
               diversion->u.file = m4_tmpopen (diversion->divnum, true);
               if (fstat (fileno (diversion->u.file), &file_stat) < 0)
                 m4_failure (errno, _("cannot stat diversion"));
-              if (file_stat.st_size < 0
-                  || (file_stat.st_size + 0UL
-                      != (unsigned long int) file_stat.st_size))
-                m4_failure (0, _("diversion too large"));
-              xfprintf (file, "D%d,%lu\n", diversion->divnum,
-                        (unsigned long int) file_stat.st_size);
+              if (file_stat.st_size < 0)
+                m4_failure (0, _("diversion file size is negative"));
+              xfprintf (file, "D%"PRIdIVAL",%jd\n", diversion->divnum,
+                        (intmax_t) {file_stat.st_size});
             }
 
           insert_diversion_helper (diversion);
@@ -1035,5 +1041,5 @@ freeze_diversions (FILE *file)
   /* Save the active diversion number, if not already.  */
 
   if (saved_number != last_inserted)
-    xfprintf (file, "D%d,0\n\n", saved_number);
+    xfprintf (file, "D%"PRIdIVAL",0\n\n", saved_number);
 }
